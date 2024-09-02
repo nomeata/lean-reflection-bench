@@ -1,0 +1,5 @@
+name = "reflection-bench"
+defaultTargets = ["ReflectionBench"]
+
+[[lean_lib]]
+name = "ReflectionBench"
