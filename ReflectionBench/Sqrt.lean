@@ -16,4 +16,6 @@ where
 def sqrtTest (n : Nat) : Bool := sqrt2 (n * n) == n
 
 #time
-#kernel_reduce sqrtTest 1000000000000
+-- #kernel_reduce sqrtTest 1000000000000
+-- #kernel_reduce sqrtTest 2
+#kernel_reduce sqrtTest 2
