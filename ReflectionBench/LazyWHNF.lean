@@ -8,15 +8,15 @@ inductive StackElem
   | app : Nat → StackElem
   | proj : Nat → StackElem
   | upd : Nat → StackElem
-  | rec_ : RecursorVal → Array Nat → Env → StackElem
+  | rec_ : RecursorVal → Array Nat → StackElem
 deriving Inhabited
 
 instance : ToString StackElem where
   toString
     | .app n => s!"@{n}"
     | .proj n => s!".{n}"
-    | .upd n => s!"#{n}"
-    | .rec_ ci _ _ => s!"#{ci.name}"
+    | .upd n => s!"upd {n}"
+    | .rec_ ci _ => s!"#{ci.name}"
 
 abbrev Stack := Array StackElem
 
@@ -48,8 +48,9 @@ abbrev Heap := Array (HeapElem × Env)
 def Lean.ConstructorVal.arity (ci : ConstructorVal) : Nat :=
   ci.numParams + ci.numFields
 
+-- Arity without the major premis
 def Lean.RecursorVal.arity (ci : RecursorVal) : Nat :=
-  ci.numParams + ci.numMotives + ci.numMinors + ci.numIndices + 1
+  ci.numParams + ci.numMotives + ci.numMinors + ci.numIndices
 
 partial def toVal (genv : Environment) : Expr → MetaM (Option Val)
   | .lam n t e bi => do
@@ -113,10 +114,10 @@ partial def stepVal (genv : Environment) (lctx : LocalContext)
           else
             throwError "Constructor is over-applied"
         | .rec_ ci us args =>
-          if args.size + 1 < ci.arity then
+          if args.size  < ci.arity then
             stepVal genv lctx heap (.rec_ ci us (args.push p)) env stack.pop
-          else if args.size + 1 == ci.arity then
-            stepPos genv lctx heap p (stack.pop.push (.rec_ ci args env))
+          else if args.size == ci.arity then
+            stepPos genv lctx heap p (stack.pop.push (.rec_ ci args))
           else
             throwError "Over-applied recursor?"
         -- | .vlam (n+1) v' =>
@@ -132,19 +133,20 @@ partial def stepVal (genv : Environment) (lctx : LocalContext)
           else
             throwError "Projection out of range"
         | _ => throwError "Cannot project value"
-      | .rec_ ci args env' =>
+      | .rec_ ci args =>
+        assert! ci.arity == args.size
         match v with
         | .lit (.natVal n) =>
           if ci.name = ``Nat.rec then
             if n = 0 then
-              stepExpr genv lctx heap ci.rules[0]!.rhs env' (stack ++ args.map (.app ·))
+              stepExpr genv lctx heap ci.rules[0]!.rhs [] (stack ++ args.reverse.map (.app ·))
             else
               let p := heap.size
               let heap' := heap.push (.value (.lit (.natVal (n-1))), [])
-              stepExpr genv lctx heap' ci.rules[1]!.rhs env' (stack ++ args.map (.app ·) ++ #[.app p])
+              stepExpr genv lctx heap' ci.rules[1]!.rhs [] (stack ++ #[.app p] ++ args.reverse.map (.app ·))
           else
             throwError "Cannot recurse on literal"
-        | _ => throwError "Cannot recurse on value {v}"
+        | _ => throwError "Cannot recurse with {ci.name} on value {v}"
 
 
 

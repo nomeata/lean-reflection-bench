@@ -15,7 +15,17 @@ where
 
 def sqrtTest (n : Nat) : Bool := sqrt2 (n * n) == n
 
-#time
+-- #time
 -- #kernel_reduce sqrtTest 1000000000000
 -- #kernel_reduce sqrtTest 2
 #kernel_reduce sqrtTest 2
+
+-- #kernel_reduce (1 : Nat).succ
+
+-- #check Bool.rec
+
+/-
+run_meta
+  let ci ← Lean.getConstInfoRec ``Nat.rec
+  Lean.logInfo m!"{ci.rules[1]!.rhs}"
+-/
