@@ -18,19 +18,19 @@ def sqrtTest (n : Nat) : Bool := sqrt2 (n * n) == n
 -- #time
 -- #kernel_reduce sqrtTest 1000000000000
 -- #kernel_reduce sqrtTest 2
+set_option maxHeartbeats 1000000
 
 def foo : Nat → Bool := Nat.rec false (fun _ _ => true)
+-- #time
+-- #kernel_reduce sqrtTest 1
 #time
-#kernel_reduce sqrtTest 1
-#time
-#lazy_reduce sqrtTest 10
+-- #lazy_reduce (List.range 1).map (Nat.succ)
+#lazy_reduce 1 / 2
 
 -- #kernel_reduce (1 : Nat).succ
 
--- #check Bool.rec
+#check Acc.intro
 
-/-
 run_meta
-  let ci ← Lean.getConstInfoRec ``Nat.rec
-  Lean.logInfo m!"{ci.rules[1]!.rhs}"
--/
+  let ci ← Lean.getConstInfoRec ``Acc.rec
+  Lean.logInfo m!"{ci.rules[0]!.rhs}"

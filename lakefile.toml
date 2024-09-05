@@ -3,3 +3,4 @@ defaultTargets = ["ReflectionBench"]
 
 [[lean_lib]]
 name = "ReflectionBench"
+precompileModules = true
