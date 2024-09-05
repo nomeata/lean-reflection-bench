@@ -18,7 +18,12 @@ def sqrtTest (n : Nat) : Bool := sqrt2 (n * n) == n
 -- #time
 -- #kernel_reduce sqrtTest 1000000000000
 -- #kernel_reduce sqrtTest 2
-#kernel_reduce sqrtTest 2
+
+def foo : Nat → Bool := Nat.rec false (fun _ _ => true)
+#time
+#kernel_reduce sqrtTest 1
+#time
+#lazy_reduce sqrtTest 10
 
 -- #kernel_reduce (1 : Nat).succ
 
