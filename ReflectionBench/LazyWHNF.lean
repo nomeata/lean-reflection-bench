@@ -100,16 +100,18 @@ def ofConf (heap : Heap) (v : Val) (env : Env) (stack : Stack) : MetaM Expr := d
 def checkValConf (lctx : LocalContext) (heap : Heap) (v : Val) (env : Env) (stack : Stack) : MetaM Unit := do
   let le ← ofConf heap v env stack
   unless (← withCurrHeartbeats (Meta.withLCtx lctx {} (Meta.isTypeCorrect le))) do
-    IO.eprint s!"{le} not typecorrect\n"
+    IO.eprint s!"In stepVal {le} not typecorrect\n"
     Meta.check le
 
 def checkExprConf (lctx : LocalContext) (heap : Heap) (e : Expr) (env : Env) (stack : Stack) : MetaM Unit := do
   let le ← inStack heap (e.instantiate (← env.toArray.mapM (ofPos heap ·))) stack
   unless (← withCurrHeartbeats (Meta.withLCtx lctx {} (Meta.isTypeCorrect le))) do
-    IO.eprint s!"{le} not typecorrect\n"
+    IO.eprint s!"In stepExpr {le} not typecorrect\n"
     Meta.check le
 
 mutual
+
+-- TODO: TCO doesn't kick in for mutual functions
 
 partial def stepPos (genv : Environment) (lctx : LocalContext)
     (heap : Heap) (p : Nat) (stack : Stack) : MetaM Expr := do
@@ -123,7 +125,7 @@ partial def stepVal (genv : Environment) (lctx : LocalContext)
     if stack.isEmpty then
       ofVal heap v env
     else
-      checkValConf lctx heap v env stack
+      -- checkValConf lctx heap v env stack
 
       let se := stack.back
       let stack := stack.pop
@@ -184,9 +186,9 @@ partial def stepVal (genv : Environment) (lctx : LocalContext)
             throwError "Unsaturated constuctor {ci.name} analyzsed by {ci.name}"
           unless rule.nfields = ci.numFields do
             throwError "Arity mismatch: {ci.name} has {ci.numFields} but {ri.name} expects {rule.nfields}"
-          let rargs := args ++ cargs[ci.numParams:]
+          let rargs : Array Nat := args[:ri.numParams + ri.numMotives + ri.numMinors] ++ cargs[ci.numParams:]
           let rhs := rule.rhs.instantiateLevelParams ri.levelParams us
-          IO.eprint s!"Applying {ri.name} with args {args} and cargs {cargs[ci.numParams:]}\n"
+          IO.eprint s!"Applying {ri.name} with args {rargs}\n"
           stepExpr genv lctx heap rhs [] (stack ++ rargs.reverse.map (.app ·))
         | _ => throwError "Cannot recurse with {ri.name} on value {v}"
 
@@ -194,7 +196,7 @@ partial def stepVal (genv : Environment) (lctx : LocalContext)
 partial def stepExpr (genv : Environment) (lctx : LocalContext)
     (heap : Heap) (e : Expr) (env : Env) (stack : Stack) : MetaM Expr := do
   -- IO.eprint s!"⊢ {e}\n"
-  checkExprConf lctx heap e env stack
+  -- checkExprConf lctx heap e env stack
   if let some v ← toVal genv e then
     stepVal genv lctx heap v env stack
   else

@@ -25,12 +25,12 @@ def foo : Nat → Bool := Nat.rec false (fun _ _ => true)
 -- #kernel_reduce sqrtTest 1
 #time
 -- #lazy_reduce (List.range 1).map (Nat.succ)
-#lazy_reduce 1 / 2
+-- #lazy_reduce sqrtTest 5
 
 -- #kernel_reduce (1 : Nat).succ
 
-#check Acc.intro
+-- #check Acc.rec
 
-run_meta
-  let ci ← Lean.getConstInfoRec ``Acc.rec
-  Lean.logInfo m!"{ci.rules[0]!.rhs}"
+-- run_meta
+--   let ci ← Lean.getConstInfoRec ``Acc.rec
+--   Lean.logInfo m!"{ci.rules[0]!.rhs}"
