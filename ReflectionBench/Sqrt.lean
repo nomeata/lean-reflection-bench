@@ -25,7 +25,7 @@ def foo : Nat → Bool := Nat.rec false (fun _ _ => true)
 -- #kernel_reduce sqrtTest 1
 #time
 -- #lazy_reduce (List.range 1).map (Nat.succ)
--- #lazy_reduce sqrtTest 5
+#lazy_reduce sqrtTest 6
 
 -- #kernel_reduce (1 : Nat).succ
 

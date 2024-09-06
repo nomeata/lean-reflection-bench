@@ -109,19 +109,18 @@ def checkExprConf (lctx : LocalContext) (heap : Heap) (e : Expr) (env : Env) (st
     IO.eprint s!"In stepExpr {le} not typecorrect\n"
     Meta.check le
 
-mutual
+-- TODO: TCO doesn't kick in for mutual functions, so we have to put it all in one function
+partial def step (genv : Environment) (lctx : LocalContext)
+    (heap : Heap) (he : HeapElem) (env : Env) (stack : Stack) : MetaM Expr := do
 
--- TODO: TCO doesn't kick in for mutual functions
+  let stepPos (p : Nat) (stack : Stack) : MetaM Expr :=
+    let (he, env') := heap[p]!
+    let stack' := if he matches .thunk _ then stack.push (.upd p) else stack
+    step genv lctx heap he env' stack'
 
-partial def stepPos (genv : Environment) (lctx : LocalContext)
-    (heap : Heap) (p : Nat) (stack : Stack) : MetaM Expr := do
-  let (he, env') := heap[p]!
   match he with
-  | .thunk e' => stepExpr genv lctx heap e' env' (stack.push (.upd p))
-  | .value v  => stepVal genv lctx heap v env' stack
+  | .value v =>
 
-partial def stepVal (genv : Environment) (lctx : LocalContext)
-  (heap : Heap) (v : Val) (env : Env) (stack : Stack) : MetaM Expr := do
     if stack.isEmpty then
       ofVal heap v env
     else
@@ -134,31 +133,31 @@ partial def stepVal (genv : Environment) (lctx : LocalContext)
       match se with
       | .upd p =>
         let heap' := heap.set! p (.value v, env)
-        stepVal genv lctx heap' v env stack
+        step genv lctx heap' (.value v) env stack
       | .app p =>
         match v with
         | .con ci us args =>
           if args.size < ci.arity then
-            stepVal genv lctx heap (.con ci us (args.push p)) env stack
+            step genv lctx heap (.value (.con ci us (args.push p))) env stack
           else
             throwError "Constructor is over-applied" -- {← ofVal heap v env}"
         | .rec_ ci us args =>
           if args.size  < ci.arity then
-            stepVal genv lctx heap (.rec_ ci us (args.push p)) env stack
+            step genv lctx heap (.value (.rec_ ci us (args.push p))) env stack
           else if args.size == ci.arity then
-            stepPos genv lctx heap p (stack.push (.rec_ ci us args))
+            stepPos p (stack.push (.rec_ ci us args))
           else
             throwError "Over-applied recursor?"
         -- | .vlam (n+1) v' =>
         --  stepVal genv lctx heap (.vlam n v') (p :: env) stack.pop
         | .elam _ _ e' _ =>
-          stepExpr genv lctx heap e' (p :: env) stack
+          step genv lctx heap (.thunk e') (p :: env) stack
         | _ => throwError "Cannot apply value {v}"
       | .proj _ idx =>
         match v with
         | .con ci _ fields =>
           if let some p := fields[ci.numParams + idx]? then
-            stepPos genv lctx heap p stack
+            stepPos p stack
           else
             throwError "Projection out of range"
         | _ => throwError "Cannot project value"
@@ -170,13 +169,13 @@ partial def stepVal (genv : Environment) (lctx : LocalContext)
             if n = 0 then
               let rhs := ri.rules[0]!.rhs
               let rhs := rhs.instantiateLevelParams ri.levelParams us
-              stepExpr genv lctx heap rhs [] (stack ++ args.reverse.map (.app ·))
+              step genv lctx heap (.thunk rhs) [] (stack ++ args.reverse.map (.app ·))
             else
               let p := heap.size
               let heap' := heap.push (.value (.lit (.natVal (n-1))), [])
               let rhs := ri.rules[1]!.rhs
               let rhs := rhs.instantiateLevelParams ri.levelParams us
-              stepExpr genv lctx heap' rhs [] (stack ++ #[.app p] ++ args.reverse.map (.app ·))
+              step genv lctx heap' (.thunk rhs) [] (stack ++ #[.app p] ++ args.reverse.map (.app ·))
           else
             throwError "Cannot recurse on literal"
         | .con ci _ cargs =>
@@ -188,59 +187,52 @@ partial def stepVal (genv : Environment) (lctx : LocalContext)
             throwError "Arity mismatch: {ci.name} has {ci.numFields} but {ri.name} expects {rule.nfields}"
           let rargs : Array Nat := args[:ri.numParams + ri.numMotives + ri.numMinors] ++ cargs[ci.numParams:]
           let rhs := rule.rhs.instantiateLevelParams ri.levelParams us
-          IO.eprint s!"Applying {ri.name} with args {rargs}\n"
-          stepExpr genv lctx heap rhs [] (stack ++ rargs.reverse.map (.app ·))
+          -- IO.eprint s!"Applying {ri.name} with args {rargs}\n"
+          step genv lctx heap (.thunk rhs) [] (stack ++ rargs.reverse.map (.app ·))
         | _ => throwError "Cannot recurse with {ri.name} on value {v}"
 
-
-partial def stepExpr (genv : Environment) (lctx : LocalContext)
-    (heap : Heap) (e : Expr) (env : Env) (stack : Stack) : MetaM Expr := do
-  -- IO.eprint s!"⊢ {e}\n"
-  -- checkExprConf lctx heap e env stack
-  if let some v ← toVal genv e then
-    stepVal genv lctx heap v env stack
-  else
-    match e with
-    | .bvar i =>
-      if let some p := env[i]? then
-        let (he, env') := heap[p]!
-        match he with
-        | .thunk e' => stepExpr genv lctx heap e' env' (stack.push (.upd p))
-        | .value v => stepVal genv lctx heap v env' stack
-      else
-        throwError "Bound variable {i} not supported yet (env: {env})"
-    | .letE _n _t v b _ =>
-      let p := heap.size
-      let heap' := heap.push (.thunk v, env)
-      let env' := p :: env
-      stepExpr genv lctx heap' b env' stack
-    | .app f a =>
-      if let .bvar i := a then
+  | .thunk e =>
+    -- IO.eprint s!"⊢ {e}\n"
+    -- checkExprConf lctx heap e env stack
+    if let some v ← toVal genv e then
+      step genv lctx heap (.value v) env stack
+    else
+      match e with
+      | .bvar i =>
         if let some p := env[i]? then
-          stepExpr genv lctx heap f env (stack.push (.app p))
+          stepPos p stack
         else
           throwError "Bound variable {i} not supported yet (env: {env})"
-      else
+      | .letE _n _t v b _ =>
         let p := heap.size
-        let heap' := heap.push (.thunk a, env)
-        stepExpr genv lctx heap' f env (stack.push (.app p))
-    | .proj n i b =>
-      let stack' := stack.push (.proj n i)
-      stepExpr genv lctx heap b env stack'
-    | .const n us => do
-        let some ci := genv.find? n | throwError "Did not find {n}"
-        match ci with
-        | .defnInfo ci =>
-          -- IO.eprint s!"Unfolding {ci.name}\n"
-          stepExpr genv lctx heap (ci.value.instantiateLevelParams ci.levelParams us) [] stack
-        | .thmInfo ci =>
-          -- IO.eprint s!"Unfolding {ci.name}\n"
-          stepExpr genv lctx heap (ci.value.instantiateLevelParams ci.levelParams us) [] stack
-        | _ => throwError "Unimplemented constant: {e}"
-    | .lam .. => unreachable!
-    | _ => throwError "Unimplemented: {e}"
-
-end
+        let heap' := heap.push (.thunk v, env)
+        let env' := p :: env
+        step genv lctx heap' (.thunk b) env' stack
+      | .app f a =>
+        if let .bvar i := a then
+          if let some p := env[i]? then
+            step genv lctx heap (.thunk f) env (stack.push (.app p))
+          else
+            throwError "Bound variable {i} not supported yet (env: {env})"
+        else
+          let p := heap.size
+          let heap' := heap.push (.thunk a, env)
+          step genv lctx heap' (.thunk f) env (stack.push (.app p))
+      | .proj n i b =>
+        let stack' := stack.push (.proj n i)
+        step genv lctx heap (.thunk b) env stack'
+      | .const n us => do
+          let some ci := genv.find? n | throwError "Did not find {n}"
+          match ci with
+          | .defnInfo ci =>
+            -- IO.eprint s!"Unfolding {ci.name}\n"
+            step genv lctx heap (.thunk (ci.value.instantiateLevelParams ci.levelParams us)) [] stack
+          | .thmInfo ci =>
+            -- IO.eprint s!"Unfolding {ci.name}\n"
+            step genv lctx heap (.thunk (ci.value.instantiateLevelParams ci.levelParams us)) [] stack
+          | _ => throwError "Unimplemented constant: {e}"
+      | .lam .. => unreachable!
+      | _ => throwError "Unimplemented: {e}"
 
 def lazyWhnf (genv : Environment) (lctx : LocalContext) (e : Expr) : MetaM Expr := do
-  stepExpr genv lctx #[] e [] #[]
+  step genv lctx #[] (HeapElem.thunk e) [] #[]
