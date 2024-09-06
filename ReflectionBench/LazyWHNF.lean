@@ -1,4 +1,21 @@
 import Lean
+/-
+
+Rough notes
+
+* Tail-recursion Optimization is fragile in lean. Do not use mutual recursion, avoid early
+  exit using `unless`
+* The kernel's `whns` optimisitically reduce the argument of `Nat.succ`, but throws it away
+  if it doesn't turn into a literal. Presumably the cache avoids duplicated work, but this is not
+  strictly call-by-name. See
+  https://gist.github.com/nomeata/e368723d9d236452f97ef7e66e652532
+
+TODO:
+
+* Eager Nat.succ
+* Nat operations
+
+-/
 
 open Lean
 
@@ -142,7 +159,7 @@ where
           else
             throwError "Constructor is over-applied" -- {← ofVal heap v env}"
         | .rec_ ci us args =>
-          if args.size  < ci.arity then
+          if args.size < ci.arity then
             go heap (.value (.rec_ ci us (args.push p))) env stack
           else if args.size == ci.arity then
             go heap (.ind p) env (stack.push (.rec_ ci us args))
