@@ -26,6 +26,8 @@ inductive StackElem
   | proj : Name → Nat → StackElem
   | upd : Nat → StackElem
   | rec_ : RecursorVal → List Level → Array Nat → StackElem
+  | nfNat : Nat → StackElem
+  | primNat : Name → Option Nat → StackElem
 deriving Inhabited
 
 instance : ToString StackElem where
@@ -34,22 +36,28 @@ instance : ToString StackElem where
     | .proj _ n => s!".{n}"
     | .upd n => s!"upd {n}"
     | .rec_ ci _ _ => s!"#{ci.name}"
+    | .nfNat n => s!"_{n}"
+    | .primNat n .none => s!"{n}"
+    | .primNat n (.some m) => s!"{n} {m}"
 
 abbrev Stack := Array StackElem
 
 inductive Val
-  | con : ConstructorVal → List Level → Array Nat → Val -- primitive, maybe partially applied
+  | con : Name → (arity fields : Nat) → List Level → Array Nat → Val -- primitive, maybe partially applied
   | rec_ : RecursorVal → List Level → Array Nat → Val -- primitive, maybe partially applied
   -- | vlam : Nat → Val → Val
   | elam : Name → Expr → Expr → BinderInfo → Val
   | lit : Lean.Literal → Val
+  | primNat : Name → Option Nat → Val
 
 def Val.toString : Val → String
-  | .con ci _ as => s!"{ci.name} {as}"
+  | .con cn _ _ _ as => s!"{cn} {as}"
   -- | .vlam n v => s!"λ^{n} ({v.toString})"
   | .rec_ ci _ as => s!"{ci.name} {as}"
   | .elam n _ e _ => s!"λ {n}. {e}"
   | .lit l => (repr l).pretty
+  | .primNat n .none => s!"{n}"
+  | .primNat n (.some m) => s!"{n} {m}"
 
 instance : ToString Val where toString := Val.toString
 
@@ -77,7 +85,7 @@ partial def toVal (genv : Environment) : Expr → MetaM (Option Val)
       | .defnInfo _ | .thmInfo _ =>
         return .none
       | .ctorInfo ci =>
-        return .some (.con ci us #[])
+        return .some (.con ci.name ci.arity ci.numFields us #[])
       | .recInfo ci =>
         return .some (.rec_ ci us #[])
         -- let arity := ci.numParams + ci.numFields
@@ -89,10 +97,13 @@ partial def toVal (genv : Environment) : Expr → MetaM (Option Val)
 
 mutual
 partial def ofVal (heap : Heap) (v : Val) (env : Env) : MetaM Expr := do match v with
-  | .con ci us args => return mkAppN (.const ci.name us) (← args.mapM (ofPos heap ·))
+  | .con cn _ _ us args => return mkAppN (.const cn us) (← args.mapM (ofPos heap ·))
   | .rec_ ci us args => return mkAppN (.const ci.name us) (← args.mapM (ofPos heap ·))
   | .elam n t b bi => return (Expr.lam n t b bi).instantiate (← env.toArray.mapM (ofPos heap ·))
   | .lit t => return .lit t
+  | .primNat n none => return .const n []
+  | .primNat n (some m) => return mkApp (.const n []) (.lit (.natVal m)) -- ofNat?
+
 
 partial def ofPos (heap : Heap) (p : Nat) : MetaM Expr := do
   let (he, env) := heap[p]!
@@ -107,6 +118,9 @@ def inStackElem (heap : Heap) (se : StackElem) (e : Expr) : MetaM Expr := match 
   | .app p => return mkApp e (← ofPos heap p)
   | .rec_ ci us args => return mkAppN (.const ci.name us) ((← args.mapM (ofPos heap ·)) ++ #[e])
   | .proj n i => return e.proj n i
+  | .nfNat n => return mkNatAdd e (mkNatLit n)
+  | .primNat n none => return mkApp (.const n []) e
+  | .primNat n (some m) => return mkApp2 (.const n []) (.lit (.natVal m)) e -- ofNat?
 
 def inStack (heap : Heap) (e : Expr) (stack : Stack) : MetaM Expr :=
   stack.foldrM (inStackElem heap) e
@@ -125,6 +139,45 @@ def checkExprConf (lctx : LocalContext) (heap : Heap) (e : Expr) (env : Env) (st
   unless (← withCurrHeartbeats (Meta.withLCtx lctx {} (Meta.isTypeCorrect le))) do
     IO.eprint s!"In stepExpr {le} not typecorrect\n"
     Meta.check le
+
+def Val.ofNat (n : Nat) : Val := .lit (.natVal n)
+
+def Val.ofBool : Bool → Val
+  | true => .con ``Bool.true 0 0 [] #[]
+  | false => .con ``Bool.false 0 0 [] #[]
+
+def primNatFuns := #[
+    ``Nat.add,
+    ``Nat.sub,
+    ``Nat.mul,
+    ``Nat.div,
+    ``Nat.mod,
+    ``Nat.pow,
+    ``Nat.gcd,
+    ``Nat.beq,
+    ``Nat.ble,
+    ``Nat.land,
+    ``Nat.lor,
+    ``Nat.xor,
+    ``Nat.shiftLeft,
+    ``Nat.shiftRight ]
+
+def evalPrimNat (n : Name) (a1 a2 : Nat) : Val := match n with
+  | ``Nat.add => .ofNat <| Nat.add a1 a2
+  | ``Nat.sub => .ofNat <| Nat.sub a1 a2
+  | ``Nat.mul => .ofNat <| Nat.mul a1 a2
+  | ``Nat.div => .ofNat <| Nat.div a1 a2
+  | ``Nat.mod => .ofNat <| Nat.mod a1 a2
+  | ``Nat.pow => .ofNat <| Nat.pow a1 a2 -- todo: guard against large exponents
+  | ``Nat.gcd => .ofNat <| Nat.gcd a1 a2
+  | ``Nat.beq => .ofBool <| Nat.beq a1 a2
+  | ``Nat.ble => .ofBool <| Nat.ble a1 a2
+  | ``Nat.land => .ofNat <| Nat.land a1 a2
+  | ``Nat.lor  => .ofNat <| Nat.lor a1 a2
+  | ``Nat.xor  => .ofNat <| Nat.xor a1 a2
+  | ``Nat.shiftLeft  => .ofNat <| Nat.shiftLeft a1 a2
+  | ``Nat.shiftRight => .ofNat <| Nat.shiftRight a1 a2
+  | _         => .ofNat 42
 
 partial def lazyWhnf (genv : Environment) (_lctx : LocalContext) (e : Expr) : MetaM Expr := do
   go #[] (HeapElem.thunk e) [] #[]
@@ -153,9 +206,9 @@ where
         go heap' (.value v) env stack
       | .app p =>
         match v with
-        | .con ci us args =>
-          if args.size < ci.arity then
-            go heap (.value (.con ci us (args.push p))) env stack
+        | .con ci carity cfields us args =>
+          if args.size < carity then
+            go heap (.value (.con ci carity cfields us (args.push p))) env stack
           else
             throwError "Constructor is over-applied" -- {← ofVal heap v env}"
         | .rec_ ci us args =>
@@ -169,11 +222,13 @@ where
         --  stepVal genv lctx heap (.vlam n v') (p :: env) stack.pop
         | .elam _ _ e' _ =>
           go heap (.thunk e') (p :: env) stack
+        | .primNat n a? =>
+          go heap (.ind p) env (stack.push (.primNat n a?) |>.push (.nfNat 0))
         | _ => throwError "Cannot apply value {v}"
       | .proj _ idx =>
         match v with
-        | .con ci _ fields =>
-          if let some p := fields[ci.numParams + idx]? then
+        | .con _cn arity fields _ args =>
+          if let some p := args[arity - fields  + idx]? then
             go heap (.ind p) env stack
           else
             throwError "Projection out of range"
@@ -195,19 +250,43 @@ where
               go heap' (.thunk rhs) [] (stack ++ #[.app p] ++ args.reverse.map (.app ·))
           else
             throwError "Cannot recurse on literal"
-        | .con ci _ cargs =>
-          let some rule := ri.rules.find? (·.ctor == ci.name)
-            | throwError "Unexpected constructor {ci.name} for recursor {ri.name}"
-          if ! cargs.size = ci.arity then
-            throwError "Unsaturated constuctor {ci.name} analyzsed by {ci.name}"
-          else if ! rule.nfields = ci.numFields then
-            throwError "Arity mismatch: {ci.name} has {ci.numFields} but {ri.name} expects {rule.nfields}"
+        | .con cn arity fields _ cargs =>
+          let some rule := ri.rules.find? (·.ctor == cn)
+            | throwError "Unexpected constructor {cn} for recursor {ri.name}"
+          if ! cargs.size = arity then
+            throwError "Unsaturated constuctor {cn} analyzsed by {ri.name}"
+          else if ! rule.nfields = fields then
+            throwError "Arity mismatch: {cn} has {fields} but {ri.name} expects {rule.nfields}"
           else
-            let rargs : Array Nat := args[:ri.numParams + ri.numMotives + ri.numMinors] ++ cargs[ci.numParams:]
+            let rargs : Array Nat := args[:ri.numParams + ri.numMotives + ri.numMinors] ++ cargs[arity - fields:]
             let rhs := rule.rhs.instantiateLevelParams ri.levelParams us
             -- IO.eprint s!"Applying {ri.name} with args {rargs}\n"
             go heap (.thunk rhs) [] (stack ++ rargs.reverse.map (.app ·))
         | _ => throwError "Cannot recurse with {ri.name} on value {v}"
+      | .nfNat n =>
+        match v with
+        | .con cn _ _ _us args =>
+          if cn = ``Nat.succ then
+            assert! args.size = 1
+            go heap (.ind args[0]!) env (stack.push (.nfNat (n+1)))
+          else if cn = ``Nat.zero then
+            go heap (.value (.lit (.natVal n))) env stack
+          else
+            throwError "Unexpcted constructor in nfNat: {v}"
+        | .lit (.natVal m) =>
+            go heap (.value (.lit (.natVal (m + n)))) env stack
+        | _ =>
+            throwError "Unexpcted value in nfNat: {v}"
+      | .primNat f none =>
+        match v with
+        | .lit (.natVal m) =>
+            go heap (.value (.primNat f m)) env stack
+        | _ => throwError "Unexpected value in primNat"
+      | .primNat f (some m) =>
+        match v with
+        | .lit (.natVal n) =>
+            go heap (.value (evalPrimNat f m n)) env stack
+        | _ => throwError "Unexpected value in primNat"
 
   | .thunk e =>
     -- IO.eprint s!"⊢ {e}\n"
@@ -241,7 +320,10 @@ where
         go heap (.thunk b) env stack'
       | .const n us => do
           let some ci := genv.find? n | throwError "Did not find {n}"
-          match ci with
+          if primNatFuns.contains n then
+            -- IO.eprint s!"Unfolding {n} (primitive)\n"
+            go heap (.value (.primNat n none)) [] stack
+          else match ci with
           | .defnInfo ci =>
             -- IO.eprint s!"Unfolding {ci.name}\n"
             go heap (.thunk (ci.value.instantiateLevelParams ci.levelParams us)) [] stack
