@@ -28,18 +28,19 @@ unsafe def mkThunk (e : Expr) (ρ : List Val) : MetaM Val := do
   let r ← IO.mkRef .none
   return .thunk e ρ r
 
-mutual
-unsafe def mkClosureN (genv : Environment) (lctx : LocalContext) (t : Expr) (ρ : List Val)
+unsafe def mkClosureN (t : Expr) (ρ : List Val)
     (f : Array Val → MetaM Val) (acc : Array Val := #[]) : MetaM Val := do
   match t with
   | .forallE _n d b _bi =>
-    let vt ← mkThunk d ρ
+  let vt := .neutral d ρ #[]
+    -- let vt ← mkThunk d ρ
     -- let vt ← eval genv lctx d ρ
     return .closure `x vt .default fun x =>
-      mkClosureN genv lctx b (x :: ρ) f (acc.push x)
+      mkClosureN b (x :: ρ) f (acc.push x)
   | _ =>
     f acc
 
+mutual
 unsafe def force (genv : Environment) (lctx : LocalContext) : Val → MetaM Val
   | .thunk e ρ r => do
     match ← r.get with
@@ -78,7 +79,7 @@ unsafe def eval (genv : Environment) (lctx : LocalContext) (e : Expr) (ρ : List
         -- logInfo m!"Unfolding {ci.name}"
         eval genv lctx ci.value []
       | .ctorInfo ci =>
-        mkClosureN genv lctx ci.type ρ fun vs =>
+        mkClosureN ci.type ρ fun vs =>
           return .con ci.name ci.arity ci.numFields us vs
       | _ => return .neutral e ρ #[]
   | .lit l => return .lit l
