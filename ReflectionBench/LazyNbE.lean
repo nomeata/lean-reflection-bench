@@ -11,6 +11,9 @@ unsafe inductive Val
 unsafe instance : Inhabited Val where
   default := .lit (.natVal 42)
 
+private def Lean.ConstructorVal.arity (ci : ConstructorVal) : Nat :=
+  ci.numParams + ci.numFields
+
 unsafe def eval (genv : Environment) (lctx : LocalContext) (e : Expr) (ρ : List Val) : MetaM Val := do
   match e with
   | .bvar n => return ρ[n]!
@@ -21,6 +24,19 @@ unsafe def eval (genv : Environment) (lctx : LocalContext) (e : Expr) (ρ : List
     | .lit l => throwError "Cannot apply literal {repr l} to {e₂}"
     | .con n _ _ _ _ => throwError "Cannot apply constructor {n} to {e₂}"
     | .closure _ _ _ f => f (← eval genv lctx e₂ ρ)
+  | .const n us =>
+      let some ci := genv.find? n | throwError "Did not find {n}"
+      match ci with
+      | .defnInfo ci | .thmInfo ci =>
+        eval genv lctx ci.value []
+      | .ctorInfo ci =>
+        if ci.arity = 0 then
+        return .con ci.name ci.arity ci.numFields us #[]
+        else
+        throwError "TODO: Nary-constructor"
+      -- | .recInfo ci =>
+      --  return .some (.rec_ ci us #[])
+      | _ => return .neutral e
   | _ => throwError "eval: unimplemented: {e}"
 
 unsafe def readback : Val → MetaM Expr
@@ -45,4 +61,4 @@ elab "#nbe_reduce" t:term : command => Lean.Elab.Command.runTermElabM fun _ => d
 
 set_option linter.unusedVariables false
 
-#nbe_reduce (fun x => (fun x => x) (fun x => x))
+#nbe_reduce (fun y => (fun z => (fun x => x) (fun x => y))) false
