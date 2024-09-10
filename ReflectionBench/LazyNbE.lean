@@ -4,6 +4,7 @@ open Lean
 
 unsafe inductive Val
   | neutral : Expr → Val
+  | thunk : Expr → List Val → Val
   | closure : Name → Expr → BinderInfo → (Val → MetaM Val) → Val
   | con : Name → (arity fields : Nat) → List Level → Array Val → Val
   | lit : Literal → Val
@@ -14,16 +15,21 @@ unsafe instance : Inhabited Val where
 private def Lean.ConstructorVal.arity (ci : ConstructorVal) : Nat :=
   ci.numParams + ci.numFields
 
-unsafe def eval (genv : Environment) (lctx : LocalContext) (e : Expr) (ρ : List Val) : MetaM Val := do
+unsafe def eval (genv : Environment) (lctx : LocalContext) (e : Expr) (ρ : List Val) :
+    MetaM Val := do
   match e with
-  | .bvar n => return ρ[n]!
+  | .bvar n => match ρ[n]! with
+    | .thunk e ρ => eval genv lctx e ρ
+    | v => return v
   | .lam n t b bi =>
-    return .closure n t bi (fun x => eval genv lctx b (x :: ρ))
-  | .app e₁ e₂ => match (← eval genv lctx e₁ ρ) with
-    | .neutral e₁' => return .neutral (.app e₁' e₂)
-    | .lit l => throwError "Cannot apply literal {repr l} to {e₂}"
-    | .con n _ _ _ _ => throwError "Cannot apply constructor {n} to {e₂}"
-    | .closure _ _ _ f => f (← eval genv lctx e₂ ρ)
+    return .closure n t bi (fun x => return .thunk b (x :: ρ))
+  | .app e₁ e₂ =>
+      match (← eval genv lctx e₁ ρ) with
+      | .neutral e₁' => return .neutral (.app e₁' e₂)
+      | .lit l => throwError "Cannot apply literal {repr l} to {e₂}"
+      | .con n _ _ _ _ => throwError "Cannot apply constructor {n} to {e₂}"
+      | .closure _ _ _ f => f (.thunk e₂ ρ)
+      | .thunk _ _ => panic! "eval returned thunk"
   | .const n us =>
       let some ci := genv.find? n | throwError "Did not find {n}"
       match ci with
@@ -41,6 +47,7 @@ unsafe def eval (genv : Environment) (lctx : LocalContext) (e : Expr) (ρ : List
 
 unsafe def readback : Val → MetaM Expr
   | .neutral e => return e
+  | .thunk e ρ => return e.instantiateRev (← ρ.mapM readback).toArray
   | .lit l => return .lit l
   | .con cn _ _ us args => return mkAppN (.const cn us) (← args.mapM readback)
   | .closure n t bi f =>
@@ -61,4 +68,6 @@ elab "#nbe_reduce" t:term : command => Lean.Elab.Command.runTermElabM fun _ => d
 
 set_option linter.unusedVariables false
 
-#nbe_reduce (fun y => (fun z => (fun x => x) (fun x => y))) false
+#nbe_reduce (fun y => y) (fun y => y)
+#nbe_reduce (fun z => (fun y => y) (fun y => y))
+#nbe_reduce (fun y => (fun z => (fun x => x) (fun x => y))) ((fun a => a) (fun a => false))
