@@ -142,3 +142,8 @@ set_option pp.funBinderTypes true
 /-- info: [id 1] -/
 #guard_msgs in
 #nbe_reduce List.cons (id 1) List.nil
+
+-- Checks that binders are correctly substituted
+/-- info: fun (y : id Bool) => true -/
+#guard_msgs in
+#nbe_reduce (fun (x : Type) => (fun (y : x) => true)) (id Bool)
