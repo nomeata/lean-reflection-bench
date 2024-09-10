@@ -9,11 +9,8 @@ Rough notes
   if it doesn't turn into a literal. Presumably the cache avoids duplicated work, but this is not
   strictly call-by-name. See
   https://gist.github.com/nomeata/e368723d9d236452f97ef7e66e652532
-
-TODO:
-
-* Eager Nat.succ
-* Nat operations
+  This code leaves `Nat.succ` as it is, but makes the built-in `Nat` operations normalize
+  its argument under `Nat.succ` (see `StackElem.nfNat`)
 
 -/
 
