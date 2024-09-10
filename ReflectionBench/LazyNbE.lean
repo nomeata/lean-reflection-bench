@@ -3,10 +3,19 @@ import Lean
 open Lean
 
 unsafe inductive Val
+  -- Neutral terms that cannot (or don't expect to, e.g. types) evaluate
+  -- include an environment (is that correct?) and list of arguments
   | neutral : Expr → List Val → Array Val → Val
+  -- An expression (with environment) we may want to evaluate later
+  -- If we do, we remember the result in the IORef.
   | thunk : Expr → List Val → (IO.Ref (Option Val)) → Val
+  -- Evaluated closure
+  -- We store the type for readback. It's a `Val`, but will always
+  -- be `.neutral`, it seems, since we don't evaluate them anyways.
   | closure : Name → Val → BinderInfo → (Val → MetaM Val) → Val
+  -- Evaluated, fully applied constructor
   | con : Name → (arity fields : Nat) → List Level → Array Val → Val
+  -- Literal
   | lit : Literal → Val
 
 unsafe def Val.toString : Val → String
@@ -56,13 +65,20 @@ unsafe def eval (genv : Environment) (lctx : LocalContext) (e : Expr) (ρ : List
   match e with
   | .bvar n => return ρ[n]!
   | .lam n t b bi =>
-    let vt ← eval genv lctx t ρ
-    return .closure n vt bi (fun x => mkThunk b (x :: ρ))
+    let vt := .neutral t ρ #[]
+    return .closure n vt bi fun x =>
+      -- We thunk the body here: Just because we want to eval `e` does not mean
+      -- we will enter the closure, so no need to look at it yet
+      -- (and if we do, remember the result)
+      mkThunk b (x :: ρ)
   | .app e₁ e₂ =>
       match (← force genv lctx (← eval genv lctx e₁ ρ)) with
-      | .neutral e₁' ρ as => return .neutral e₁' ρ (as.push (.neutral e₂ ρ #[]))
-      | .closure _ _ _ f => f (← mkThunk e₂ ρ)
-      | .thunk _ _ _ => panic! "force returned thunk"
+      | .neutral e₁' ρ as =>
+        return .neutral e₁' ρ (as.push (.neutral e₂ ρ #[]))
+      | .closure _ _ _ f =>
+        f (← mkThunk e₂ ρ)
+      | .thunk _ _ _ =>
+        panic! "force returned thunk"
       | v => throwError "Cannot apply value {v}"
   | .proj _ idx e =>
       match (← force genv lctx (← eval genv lctx e ρ)) with
