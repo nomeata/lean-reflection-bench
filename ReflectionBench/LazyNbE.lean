@@ -201,6 +201,10 @@ unsafe def eval (genv : Environment) (lctx : LocalContext) (e : Expr) (ρ : List
   | _ => throwError "eval: unimplemented: {e}"
 end
 
+-- Highly inefficient
+-- Should cache results and read back only those elements of the environment that are actually
+-- used.
+-- But as long as we only test reading back small examples and `Nat`s otherwise, fine
 unsafe def readback : Val → MetaM Expr
   | .neutral e ρ as => do
     return mkAppN (e.instantiate (← ρ.mapM readback).toArray) (← as.mapM readback)
