@@ -284,4 +284,21 @@ set_option pp.funBinderTypes true
 #guard_msgs in
 #nbe_reduce let x := id id; x true
 
+/-- info: 66 -/
+#guard_msgs in
+#nbe_reduce Nat.add 42 (Nat.succ 23)
+
+/-- info: fun (x : Nat) => Nat.add 42 x -/
+#guard_msgs in
+#nbe_reduce Nat.add 42
+
+/-- info: fun (x : Nat) => (Nat.succ 42).add x -/
+#guard_msgs in
+#nbe_reduce Nat.add (Nat.succ 42)
+
+opaque aNat : Nat
+/-- info: (Nat.succ 42).add aNat.succ -/
+#guard_msgs in
+#nbe_reduce Nat.add (Nat.succ 42) (Nat.succ aNat)
+
 end Lean.LazyNbE
