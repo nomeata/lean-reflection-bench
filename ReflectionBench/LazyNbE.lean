@@ -114,6 +114,7 @@ unsafe def eval (genv : Environment) (lctx : LocalContext) (e : Expr) (ρ : List
         mkClosureN ci.type ρ fun vs => do
           unless vs.size = ci.numParams + ci.numMotives + ci.numMinors + ci.numIndices + 1 do
             throwError "Recursor arity mismatch"
+          let rargs : Array _ := vs[:ci.numParams + ci.numMotives + ci.numMinors]
           match (← force genv lctx vs.back) with
           | .con cn _us _as fs =>
             let some rule := ci.rules.find? (·.ctor == cn)
@@ -121,12 +122,25 @@ unsafe def eval (genv : Environment) (lctx : LocalContext) (e : Expr) (ρ : List
             if ! rule.nfields = fs.size then
               throwError "Arity mismatch: {cn} has {fs.size} but {ci.name} expects {rule.nfields} fields"
             else
-              let rargs : Array _ := vs[:ci.numParams + ci.numMotives + ci.numMinors]
               let rhs := rule.rhs.instantiateLevelParams ci.levelParams us
               let rhs := getLambdaBodyN (rargs.size + fs.size) rhs
               -- logInfo m!"Applying {ci.name} with args {rargs} and {fs}\n"
               -- IO.eprint s!"Applying {ci.name} with args {rargs} and {fs}\n"
-              eval genv lctx rhs ((rargs ++ fs).toListRev ++ ρ) -- TODO: Reverse?
+              eval genv lctx rhs ((rargs ++ fs).toListRev ++ ρ)
+          | .lit (.natVal n) =>
+            unless ci.name = ``Nat.rec do
+              throwError "Cannot apply recursor {ci.name} to literal {n}"
+            if n = 0 then
+              let rhs := ci.rules[0]!.rhs
+              let rhs := rhs.instantiateLevelParams ci.levelParams us
+              let rhs := getLambdaBodyN rargs.size rhs
+              eval genv lctx rhs (rargs.toListRev ++ ρ)
+            else
+              let rhs := ci.rules[1]!.rhs
+              let rhs := rhs.instantiateLevelParams ci.levelParams us
+              let rhs := getLambdaBodyN (rargs.size + 1) rhs
+              eval genv lctx rhs ((.lit (.natVal (n-1))) :: rargs.toListRev ++ ρ)
+
           | v => throwError "Cannot apply recursor to {v}"
       | _ => return .neutral e ρ #[]
   | .lit l => return .lit l
@@ -209,3 +223,12 @@ set_option pp.funBinderTypes true
 /-- info: some (id true) -/
 #guard_msgs in
 #nbe_reduce ([id true, false] ++ [false]).head?
+
+/--
+info: 22
+---
+info: time: 6ms
+-/
+#guard_msgs in
+#time
+#nbe_reduce 42 - 20
