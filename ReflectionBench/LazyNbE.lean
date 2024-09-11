@@ -14,15 +14,15 @@ unsafe inductive Val
   -- be `.neutral`, it seems, since we don't evaluate them anyways.
   | closure : Name → Val → BinderInfo → (Val → MetaM Val) → Val
   -- Evaluated, fully applied constructor
-  | con : Name → (arity fields : Nat) → List Level → Array Val → Val
+  | con : Name → List Level → (params fields : Array Val)  → Val
   -- Literal
   | lit : Literal → Val
 
 unsafe def Val.toString : Val → String
   | .neutral e ρ as => s!"{e} {ρ.map toString} {as.map toString}"
-  | .thunk e b _ => s!"(t) {e}{b.map toString}"
+  | .thunk e ρ _ => s!"(t) {e}{ρ.map toString}"
   | .closure n t _ _ => s!"(λ {n} : {toString t}.…)"
-  | .con cn _ _ _ as => s!"{cn} {as.map toString}"
+  | .con cn _ ps fs => s!"{cn} {(ps ++ fs).map toString}"
   | .lit l => (repr l).pretty
 
 unsafe instance : ToString Val where toString := Val.toString
@@ -30,12 +30,18 @@ unsafe instance : ToString Val where toString := Val.toString
 unsafe instance : Inhabited Val where
   default := .lit (.natVal 42)
 
-private def Lean.ConstructorVal.arity (ci : ConstructorVal) : Nat :=
-  ci.numParams + ci.numFields
-
 unsafe def mkThunk (e : Expr) (ρ : List Val) : MetaM Val := do
-  let r ← IO.mkRef .none
-  return .thunk e ρ r
+  -- Avoid creating thunks for cheap things. (TODO: Deduplicate)
+  match e with
+  | .bvar n =>
+    return ρ[n]!
+  | .lit l => return .lit l
+  | .forallE .. => return .neutral e ρ #[]
+  | .sort .. => return .neutral e ρ #[]
+  | _ =>
+    let r ← IO.mkRef .none
+    let ρ := ρ.take (e.looseBVarRange)
+    return .thunk e ρ r
 
 unsafe def mkClosureN (t : Expr) (ρ : List Val)
     (f : Array Val → MetaM Val) (acc : Array Val := #[]) : MetaM Val := do
@@ -48,6 +54,10 @@ unsafe def mkClosureN (t : Expr) (ρ : List Val)
       mkClosureN b (x :: ρ) f (acc.push x)
   | _ =>
     f acc
+
+def getLambdaBodyN (n : Nat) (e : Expr) : Expr := match n with
+  | 0 => e
+  | n+1 => getLambdaBodyN n e.bindingBody!
 
 mutual
 unsafe def force (genv : Environment) (lctx : LocalContext) : Val → MetaM Val
@@ -66,7 +76,7 @@ unsafe def eval (genv : Environment) (lctx : LocalContext) (e : Expr) (ρ : List
   | .bvar n => return ρ[n]!
   | .lam n t b bi =>
     let vt := .neutral t ρ #[]
-    return .closure n vt bi fun x =>
+    return .closure n vt bi fun x => do
       -- We thunk the body here: Just because we want to eval `e` does not mean
       -- we will enter the closure, so no need to look at it yet
       -- (and if we do, remember the result)
@@ -82,8 +92,8 @@ unsafe def eval (genv : Environment) (lctx : LocalContext) (e : Expr) (ρ : List
       | v => throwError "Cannot apply value {v}"
   | .proj _ idx e =>
       match (← force genv lctx (← eval genv lctx e ρ)) with
-      | .con _cn arity fields _ args =>
-        if let some v := args[arity - fields + idx]? then
+      | .con _cn _us _ps fs =>
+        if let some v := fs[idx]? then
           return v
         else
           throwError "Projection out of range"
@@ -93,10 +103,31 @@ unsafe def eval (genv : Environment) (lctx : LocalContext) (e : Expr) (ρ : List
       match ci with
       | .defnInfo ci | .thmInfo ci =>
         -- logInfo m!"Unfolding {ci.name}"
-        eval genv lctx ci.value []
+        let e := ci.value.instantiateLevelParams ci.levelParams us
+        eval genv lctx e []
       | .ctorInfo ci =>
-        mkClosureN ci.type ρ fun vs =>
-          return .con ci.name ci.arity ci.numFields us vs
+        mkClosureN ci.type ρ fun vs => do
+          unless vs.size = ci.numParams + ci.numFields do
+            throwError "Closure arity mismatch"
+          return .con ci.name us vs[:ci.numParams] vs[ci.numParams:]
+      | .recInfo ci =>
+        mkClosureN ci.type ρ fun vs => do
+          unless vs.size = ci.numParams + ci.numMotives + ci.numMinors + ci.numIndices + 1 do
+            throwError "Recursor arity mismatch"
+          match (← force genv lctx vs.back) with
+          | .con cn _us _as fs =>
+            let some rule := ci.rules.find? (·.ctor == cn)
+              | throwError "Unexpected constructor {cn} for recursor {ci.name}"
+            if ! rule.nfields = fs.size then
+              throwError "Arity mismatch: {cn} has {fs.size} but {ci.name} expects {rule.nfields} fields"
+            else
+              let rargs : Array _ := vs[:ci.numParams + ci.numMotives + ci.numMinors]
+              let rhs := rule.rhs.instantiateLevelParams ci.levelParams us
+              let rhs := getLambdaBodyN (rargs.size + fs.size) rhs
+              -- logInfo m!"Applying {ci.name} with args {rargs} and {fs}\n"
+              -- IO.eprint s!"Applying {ci.name} with args {rargs} and {fs}\n"
+              eval genv lctx rhs ((rargs ++ fs).toListRev ++ ρ) -- TODO: Reverse?
+          | v => throwError "Cannot apply recursor to {v}"
       | _ => return .neutral e ρ #[]
   | .lit l => return .lit l
   | .forallE .. => return .neutral e ρ #[]
@@ -111,8 +142,8 @@ unsafe def readback : Val → MetaM Expr
     | .some v => readback v
     | .none => return e.instantiate (← ρ.mapM readback).toArray
   | .lit l => return .lit l
-  | .con cn _ _ us args =>
-    return mkAppN (.const cn us) (← args.mapM readback)
+  | .con cn us ps fs =>
+    return mkAppN (.const cn us) (← (ps ++ fs).mapM readback)
   | .closure n tv bi f => do
     let t ← readback tv
     Meta.withLocalDecl n bi t fun x => do
@@ -122,8 +153,9 @@ unsafe def readback : Val → MetaM Expr
 
 unsafe def lazyWhnfImpl (genv : Environment) (lctx : LocalContext) (e : Expr) : MetaM Expr := do
   let v ← eval genv lctx e []
-  -- logInfo m!"{v}"
+  -- logInfo m!"Evaled, not forced: {v}"
   let v ← force genv lctx v
+  -- logInfo m!"Forced: {v}"
   readback v
 
 @[implemented_by lazyWhnfImpl]
@@ -163,3 +195,17 @@ set_option pp.funBinderTypes true
 /-- info: fun (y : id Bool) => true -/
 #guard_msgs in
 #nbe_reduce (fun (x : Type) => (fun (y : x) => true)) (id Bool)
+
+
+/-- info: 2 -/
+#guard_msgs in
+#nbe_reduce (Bool.rec 1 2 true : Nat)
+
+/-- info: id true :: List.rec [] (fun (x : Bool) (xs ih : List Bool) => id x :: ih) [false] -/
+#guard_msgs in
+#nbe_reduce (List.rec [] (fun x xs ih => id x :: ih) [true, false] : List Bool)
+-- #nbe_reduce List.map id [true, false]
+
+/-- info: some (id true) -/
+#guard_msgs in
+#nbe_reduce ([id true, false] ++ [false]).head?
