@@ -85,15 +85,21 @@ private unsafe def primNatFuns : NameMap ((a1 a2 : Nat) → Val) :=
     (``Nat.shiftRight, fun a1 a2 => .ofNat <| Nat.shiftRight a1 a2)]
 
 mutual
-unsafe def force (genv : Environment) (lctx : LocalContext) : Val → MetaM Val
-  | .thunk e ρ r => do
-    match ← r.get with
-    | .some v => return v
-    | .none =>
-      let v ← force genv lctx (← eval genv lctx e ρ)
-      r.set v
-      return v
-  | v => return v
+-- Using a while loop to make sure it's tail recursive
+unsafe def force (genv : Environment) (lctx : LocalContext) (v : Val) : MetaM Val := do
+  let mut v := v
+  let mut rs := #[]
+  while true do
+    if let .thunk e ρ r := v then
+      match ← r.get with
+      | .some v' => v := v'
+      | .none =>
+        rs := rs.push r
+        v ← eval genv lctx e ρ
+    else
+      break
+  rs.forM (·.set v)
+  return v
 
 unsafe def forceNat (genv : Environment) (lctx : LocalContext) (acc : Nat) (v : Val) : MetaM (Option Nat) := do
   match (← force genv lctx v) with

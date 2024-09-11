@@ -17,8 +17,6 @@ def minFacAux (n : Nat) : Nat → Nat :=
 
 
 -- several seconds:
--- #time #kernel_reduce minFacAux 2147483647 3
--- #time #lazy_reduce   minFacAux 2147483647 3
-
--- Stack overflow
--- #time #nbe_reduce    minFacAux 2147483647 3
+#time #kernel_reduce minFacAux 2147483647 3
+#time #lazy_reduce   minFacAux 2147483647 3
+#time #nbe_reduce    minFacAux 2147483647 3
