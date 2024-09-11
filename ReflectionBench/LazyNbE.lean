@@ -153,15 +153,21 @@ unsafe def eval (genv : Environment) (lctx : LocalContext) (e : Expr) (ρ : List
       else match ci with
       | .defnInfo ci | .thmInfo ci =>
         -- logInfo m!"Unfolding {ci.name}"
+        let t := ci.type.instantiateLevelParams ci.levelParams us
         let e := ci.value.instantiateLevelParams ci.levelParams us
-        eval genv lctx e []
+        let arity := e.getNumHeadLambdas
+        mkClosure arity (.neutral t ρ #[]) fun vs => do
+          let e := getLambdaBodyN arity e
+          eval genv lctx e vs.toListRev
       | .ctorInfo ci =>
+        let t := ci.type.instantiateLevelParams ci.levelParams us
         let arity := ci.numParams + ci.numFields
-        mkClosure arity (.neutral ci.type ρ #[]) fun vs => do
+        mkClosure arity (.neutral t ρ #[]) fun vs => do
           return .con ci.name us vs[:ci.numParams] vs[ci.numParams:]
       | .recInfo ci =>
+        let t := ci.type.instantiateLevelParams ci.levelParams us
         let arity :=ci.numParams + ci.numMotives + ci.numMinors + ci.numIndices + 1
-        mkClosure arity (.neutral ci.type ρ #[]) fun vs => do
+        mkClosure arity (.neutral t ρ #[]) fun vs => do
           let rargs : Array _ := vs[:ci.numParams + ci.numMotives + ci.numMinors]
           match (← force genv lctx vs.back) with
           | .con cn _us _as fs =>
