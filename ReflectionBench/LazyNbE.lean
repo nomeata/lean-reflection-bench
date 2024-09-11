@@ -27,7 +27,7 @@ unsafe def Val.toString : Val → String
   | .con cn _ ps fs => s!"{cn} {(ps ++ fs).map toString}"
   | .lit l => (repr l).pretty
 
-unsafe def mkClosure (arity : Nat) (type : Val) (f : Array Val → MetaM Val) : MetaM Val :=
+unsafe def mkClosure (arity : Nat) (type : Val) (f : Array Val → MetaM Val) : MetaM Val := do
   if arity = 0 then
     f #[]
   else
@@ -55,6 +55,11 @@ unsafe def mkThunk (e : Expr) (ρ : List Val) : MetaM Val := do
 def getLambdaBodyN (n : Nat) (e : Expr) : Expr := match n with
   | 0 => e
   | n+1 => getLambdaBodyN n e.bindingBody!
+
+def getLambdaTypeN : Nat → Expr → Expr
+  | 0, _ => .sort 42 -- dummy
+  | n+1, .lam i t b bi => .forallE i t (getLambdaTypeN n b) bi
+  | _, _ => panic! "getLambdaTypeN: Not enough lambdas"
 
 unsafe def Val.ofNat (n : Nat) : Val := .lit (.natVal n)
 
@@ -107,14 +112,13 @@ unsafe def eval (genv : Environment) (lctx : LocalContext) (e : Expr) (ρ : List
     MetaM Val := do
   match e with
   | .bvar n => return ρ[n]!
-  | .lam n t b bi =>
-    let vt := .neutral (.forallE n t (.sort 24) bi) ρ #[]
-    mkClosure 1 vt fun xs => do
-      assert! xs.size = 1
-      -- We thunk the body here: Just because we want to eval `e` does not mean
-      -- we will enter the closure, so no need to look at it yet
-      -- (and if we do, remember the result)
-      mkThunk b (xs.toList ++ ρ)
+  | .lam .. =>
+    let arity := e.getNumHeadLambdas
+    let t := getLambdaTypeN arity e
+    mkClosure arity (.neutral t ρ #[]) fun vs => do
+      let e := getLambdaBodyN arity e
+      -- eval genv lctx e (vs.toListRev ++ ρ)
+      mkThunk e (vs.toListRev ++ ρ)
   | .app e₁ e₂ =>
       match (← force genv lctx (← eval genv lctx e₁ ρ)) with
       | .neutral e₁' ρ as =>

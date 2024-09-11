@@ -12,3 +12,4 @@ elab "#lazy_reduce" t:term : command => Lean.Elab.Command.runTermElabM fun _ => 
   let e ← Lean.Elab.Term.elabTermAndSynthesize t none
   let e'' ← lazyWhnf (← Lean.getEnv) (← Lean.getLCtx) e
   Lean.logInfo m!"{e''}"
+
