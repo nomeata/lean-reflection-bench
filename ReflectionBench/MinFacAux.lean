@@ -11,13 +11,14 @@ def minFacAux (n : Nat) : Nat → Nat :=
       else
         ih (k + 2) (by simp_wf; apply minFac_lemma n k; assumption)
 
--- #time
--- #kernel_reduce minFacAux  524287 3
--- #kernel_reduce minFacAux  2147483647 3
-
--- #time #kernel_reduce minFacAux 524287 3
--- #time #lazy_reduce   minFacAux 524287 3
+#time #kernel_reduce minFacAux  524287 3
+#time #lazy_reduce   minFacAux  524287 3
+#time #nbe_reduce    minFacAux  524287 3
 
 
-#time #kernel_reduce minFacAux 2147483647 3
-#time #lazy_reduce   minFacAux 2147483647  3
+-- several seconds:
+-- #time #kernel_reduce minFacAux 2147483647 3
+-- #time #lazy_reduce   minFacAux 2147483647 3
+
+-- Stack overflow
+-- #time #nbe_reduce    minFacAux 2147483647 3

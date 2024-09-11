@@ -2,6 +2,8 @@ import Lean
 
 open Lean
 
+namespace Lean.LazyNbE
+
 unsafe inductive Val
   -- Neutral terms that cannot (or don't expect to, e.g. types) evaluate
   -- include an environment (is that correct?) and list of arguments
@@ -59,6 +61,29 @@ def getLambdaBodyN (n : Nat) (e : Expr) : Expr := match n with
   | 0 => e
   | n+1 => getLambdaBodyN n e.bindingBody!
 
+unsafe def Val.ofNat (n : Nat) : Val := .lit (.natVal n)
+
+unsafe def Val.ofBool : Bool → Val
+  | true => .con ``Bool.true [] #[] #[]
+  | false => .con ``Bool.false [] #[] #[]
+
+private unsafe def primNatFuns : NameMap ((a1 a2 : Nat) → Val) :=
+  .fromArray (cmp := _) #[
+    (``Nat.add, fun a1 a2 => .ofNat <| Nat.add a1 a2),
+    (``Nat.sub, fun a1 a2 => .ofNat <| Nat.sub a1 a2),
+    (``Nat.mul, fun a1 a2 => .ofNat <| Nat.mul a1 a2),
+    (``Nat.div, fun a1 a2 => .ofNat <| Nat.div a1 a2),
+    (``Nat.mod, fun a1 a2 => .ofNat <| Nat.mod a1 a2),
+    (``Nat.pow, fun a1 a2 => .ofNat <| Nat.pow a1 a2), -- todo: guard against large exponents
+    (``Nat.gcd, fun a1 a2 => .ofNat <| Nat.gcd a1 a2),
+    (``Nat.beq, fun a1 a2 => .ofBool <| Nat.beq a1 a2),
+    (``Nat.ble, fun a1 a2 => .ofBool <| Nat.ble a1 a2),
+    (``Nat.land, fun a1 a2 => .ofNat <| Nat.land a1 a2),
+    (``Nat.lor , fun a1 a2 => .ofNat <| Nat.lor a1 a2),
+    (``Nat.xor , fun a1 a2 => .ofNat <| Nat.xor a1 a2),
+    (``Nat.shiftLeft , fun a1 a2 => .ofNat <| Nat.shiftLeft a1 a2),
+    (``Nat.shiftRight, fun a1 a2 => .ofNat <| Nat.shiftRight a1 a2)]
+
 mutual
 unsafe def force (genv : Environment) (lctx : LocalContext) : Val → MetaM Val
   | .thunk e ρ r => do
@@ -69,6 +94,13 @@ unsafe def force (genv : Environment) (lctx : LocalContext) : Val → MetaM Val
       r.set v
       return v
   | v => return v
+
+unsafe def forceNat (genv : Environment) (lctx : LocalContext) (acc : Nat) (v : Val) : MetaM (Option Nat) := do
+  match (← force genv lctx v) with
+  | .lit (.natVal n) => return (n+acc)
+  | .con `Nat.succ _ _ #[v] => forceNat genv lctx (acc + 1) v
+  | .con `Nat.zero _ _ _ => return acc
+  | _ => return none
 
 unsafe def eval (genv : Environment) (lctx : LocalContext) (e : Expr) (ρ : List Val) :
     MetaM Val := do
@@ -100,7 +132,19 @@ unsafe def eval (genv : Environment) (lctx : LocalContext) (e : Expr) (ρ : List
       | v => throwError "Cannot project value {v}"
   | .const n us =>
       let some ci := genv.find? n | throwError "Did not find {n}"
-      match ci with
+      if let some fn := primNatFuns.find? n then
+        -- IO.eprint s!"Unfolding {n} (primitive)\n"
+        mkClosureN ci.type ρ fun vs => do
+          unless vs.size = 2 do
+            throwError "Prim fun application arity mismatch"
+          let v1 ← forceNat genv lctx 0 vs[0]!
+          let v2 ← forceNat genv lctx 0 vs[1]!
+          match v1, v2 with
+          | .some n₁, .some n₂ =>
+            return fn n₁ n₂
+          | _, _ =>
+            return .neutral e [] vs
+      else match ci with
       | .defnInfo ci | .thmInfo ci =>
         -- logInfo m!"Unfolding {ci.name}"
         let e := ci.value.instantiateLevelParams ci.levelParams us
@@ -143,6 +187,8 @@ unsafe def eval (genv : Environment) (lctx : LocalContext) (e : Expr) (ρ : List
 
           | v => throwError "Cannot apply recursor to {v}"
       | _ => return .neutral e ρ #[]
+  | .letE n t rhs b _ =>
+    eval genv lctx (.app (.lam n t b .default) rhs) ρ
   | .lit l => return .lit l
   | .forallE .. => return .neutral e ρ #[]
   | .sort .. => return .neutral e ρ #[]
@@ -224,11 +270,12 @@ set_option pp.funBinderTypes true
 #guard_msgs in
 #nbe_reduce ([id true, false] ++ [false]).head?
 
-/--
-info: 22
----
-info: time: 6ms
--/
+/-- info: 22 -/
 #guard_msgs in
-#time
 #nbe_reduce 42 - 20
+
+/-- info: true -/
+#guard_msgs in
+#nbe_reduce let x := id id; x true
+
+end Lean.LazyNbE
