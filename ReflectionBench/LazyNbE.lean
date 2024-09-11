@@ -11,10 +11,10 @@ unsafe inductive Val
   -- An expression (with environment) we may want to evaluate later
   -- If we do, we remember the result in the IORef.
   | thunk : Expr → List Val → (IO.Ref (Option Val)) → Val
-  -- Evaluated closure
+  -- Evaluated, partially applied closure
   -- We store the type for readback. It's a `Val`, but will always
   -- be `.neutral`, it seems, since we don't evaluate them anyways.
-  | closure : Name → Val → BinderInfo → (Val → MetaM Val) → Val
+  | closure : (arity : Nat) → (type : Val) → (pargs : Array Val) → (Array Val → MetaM Val) → Val
   -- Evaluated, fully applied constructor
   | con : Name → List Level → (params fields : Array Val)  → Val
   -- Literal
@@ -23,9 +23,15 @@ unsafe inductive Val
 unsafe def Val.toString : Val → String
   | .neutral e ρ as => s!"{e} {ρ.map toString} {as.map toString}"
   | .thunk e ρ _ => s!"(t) {e}{ρ.map toString}"
-  | .closure n t _ _ => s!"(λ {n} : {toString t}.…)"
+  | .closure n t as _f => s!"(λ^{n} … : {toString t}) {as.map toString}"
   | .con cn _ ps fs => s!"{cn} {(ps ++ fs).map toString}"
   | .lit l => (repr l).pretty
+
+unsafe def mkClosure (arity : Nat) (type : Val) (f : Array Val → MetaM Val) : MetaM Val :=
+  if arity = 0 then
+    f #[]
+  else
+    return .closure arity type #[] f
 
 unsafe instance : ToString Val where toString := Val.toString
 
@@ -36,6 +42,7 @@ unsafe def mkThunk (e : Expr) (ρ : List Val) : MetaM Val := do
   -- Avoid creating thunks for cheap things. (TODO: Deduplicate)
   match e with
   | .bvar n =>
+    assert! n < ρ.length
     return ρ[n]!
   | .lit l => return .lit l
   | .forallE .. => return .neutral e ρ #[]
@@ -44,18 +51,6 @@ unsafe def mkThunk (e : Expr) (ρ : List Val) : MetaM Val := do
     let r ← IO.mkRef .none
     let ρ := ρ.take (e.looseBVarRange)
     return .thunk e ρ r
-
-unsafe def mkClosureN (t : Expr) (ρ : List Val)
-    (f : Array Val → MetaM Val) (acc : Array Val := #[]) : MetaM Val := do
-  match t with
-  | .forallE _n d b _bi =>
-  let vt := .neutral d ρ #[]
-    -- let vt ← mkThunk d ρ
-    -- let vt ← eval genv lctx d ρ
-    return .closure `x vt .default fun x =>
-      mkClosureN b (x :: ρ) f (acc.push x)
-  | _ =>
-    f acc
 
 def getLambdaBodyN (n : Nat) (e : Expr) : Expr := match n with
   | 0 => e
@@ -113,18 +108,24 @@ unsafe def eval (genv : Environment) (lctx : LocalContext) (e : Expr) (ρ : List
   match e with
   | .bvar n => return ρ[n]!
   | .lam n t b bi =>
-    let vt := .neutral t ρ #[]
-    return .closure n vt bi fun x => do
+    let vt := .neutral (.forallE n t (.sort 24) bi) ρ #[]
+    mkClosure 1 vt fun xs => do
+      assert! xs.size = 1
       -- We thunk the body here: Just because we want to eval `e` does not mean
       -- we will enter the closure, so no need to look at it yet
       -- (and if we do, remember the result)
-      mkThunk b (x :: ρ)
+      mkThunk b (xs.toList ++ ρ)
   | .app e₁ e₂ =>
       match (← force genv lctx (← eval genv lctx e₁ ρ)) with
       | .neutral e₁' ρ as =>
         return .neutral e₁' ρ (as.push (.neutral e₂ ρ #[]))
-      | .closure _ _ _ f =>
-        f (← mkThunk e₂ ρ)
+      | .closure arity t as f => do
+        let as' := as.push (← mkThunk e₂ ρ)
+        if as'.size < arity then
+          return .closure arity t as' f
+        else
+          assert! as'.size = arity
+          f as'
       | .thunk _ _ _ =>
         panic! "force returned thunk"
       | v => throwError "Cannot apply value {v}"
@@ -140,9 +141,8 @@ unsafe def eval (genv : Environment) (lctx : LocalContext) (e : Expr) (ρ : List
       let some ci := genv.find? n | throwError "Did not find {n}"
       if let some fn := primNatFuns.find? n then
         -- IO.eprint s!"Unfolding {n} (primitive)\n"
-        mkClosureN ci.type ρ fun vs => do
-          unless vs.size = 2 do
-            throwError "Prim fun application arity mismatch"
+        mkClosure 2 (.neutral ci.type ρ #[]) fun vs => do
+          assert! vs.size = 2
           let v1 ← forceNat genv lctx 0 vs[0]!
           let v2 ← forceNat genv lctx 0 vs[1]!
           match v1, v2 with
@@ -156,14 +156,12 @@ unsafe def eval (genv : Environment) (lctx : LocalContext) (e : Expr) (ρ : List
         let e := ci.value.instantiateLevelParams ci.levelParams us
         eval genv lctx e []
       | .ctorInfo ci =>
-        mkClosureN ci.type ρ fun vs => do
-          unless vs.size = ci.numParams + ci.numFields do
-            throwError "Closure arity mismatch"
+        let arity := ci.numParams + ci.numFields
+        mkClosure arity (.neutral ci.type ρ #[]) fun vs => do
           return .con ci.name us vs[:ci.numParams] vs[ci.numParams:]
       | .recInfo ci =>
-        mkClosureN ci.type ρ fun vs => do
-          unless vs.size = ci.numParams + ci.numMotives + ci.numMinors + ci.numIndices + 1 do
-            throwError "Recursor arity mismatch"
+        let arity :=ci.numParams + ci.numMotives + ci.numMinors + ci.numIndices + 1
+        mkClosure arity (.neutral ci.type ρ #[]) fun vs => do
           let rargs : Array _ := vs[:ci.numParams + ci.numMotives + ci.numMinors]
           match (← force genv lctx vs.back) with
           | .con cn _us _as fs =>
@@ -214,12 +212,13 @@ unsafe def readback : Val → MetaM Expr
   | .lit l => return .lit l
   | .con cn us ps fs =>
     return mkAppN (.const cn us) (← (ps ++ fs).mapM readback)
-  | .closure n tv bi f => do
+  | .closure arity tv as f => do
     let t ← readback tv
-    Meta.withLocalDecl n bi t fun x => do
-      let rv ← f (.neutral x [] #[])
+    let f ← Meta.forallBoundedTelescope t arity fun xs _ => do
+      let rv ← f (xs.map (Val.neutral · [] #[]))
       let re ← readback rv
-      Meta.mkLambdaFVars #[x] re
+      Meta.mkLambdaFVars xs re
+    return f.beta (← as.mapM readback)
 
 unsafe def lazyWhnfImpl (genv : Environment) (lctx : LocalContext) (e : Expr) : MetaM Expr := do
   let v ← eval genv lctx e []
@@ -241,19 +240,24 @@ elab "#nbe_reduce" t:term : command => Lean.Elab.Command.runTermElabM fun _ => d
 set_option linter.unusedVariables false
 set_option pp.funBinderTypes true
 
+/-- info: true -/
+#guard_msgs in
+#nbe_reduce id true
+
 -- Tests sharing:
 -- The `id (fun a => a)` should be reduced once, not twice, and the result
 -- should not mention that redex anymore.
+
 
 /-- info: fun (z : Bool) => (fun (a : Bool → Bool) => a) Bool.not z -/
 #guard_msgs in
 #nbe_reduce (fun x => x (x (fun z => x Bool.not z))) (id (fun (a : Bool → Bool) => a))
 
-/-- info: fun (x : Nat) (x_1 : List Nat) => x :: x_1 -/
+/-- info: fun (head : Nat) (tail : List Nat) => head :: tail -/
 #guard_msgs in
 #nbe_reduce @List.cons Nat
 
-/-- info: fun (x : List Nat) => id 1 :: x -/
+/-- info: fun (tail : List Nat) => id 1 :: tail -/
 #guard_msgs in
 #nbe_reduce @List.cons Nat (id 1)
 
@@ -265,7 +269,6 @@ set_option pp.funBinderTypes true
 /-- info: fun (y : id Bool) => true -/
 #guard_msgs in
 #nbe_reduce (fun (x : Type) => (fun (y : x) => true)) (id Bool)
-
 
 /-- info: 2 -/
 #guard_msgs in
@@ -292,11 +295,11 @@ set_option pp.funBinderTypes true
 #guard_msgs in
 #nbe_reduce Nat.add 42 (Nat.succ 23)
 
-/-- info: fun (x : Nat) => Nat.add 42 x -/
+/-- info: fun (a : Nat) => Nat.add 42 a -/
 #guard_msgs in
 #nbe_reduce Nat.add 42
 
-/-- info: fun (x : Nat) => (Nat.succ 42).add x -/
+/-- info: fun (a : Nat) => (Nat.succ 42).add a -/
 #guard_msgs in
 #nbe_reduce Nat.add (Nat.succ 42)
 
