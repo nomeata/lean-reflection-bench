@@ -1,6 +1,17 @@
 name = "reflection-bench"
 defaultTargets = ["ReflectionBench"]
 
+[[require]]
+name = "mathlib"
+git = "https://github.com/leanprover-community/mathlib4.git"
+rev = "nightly-testing-2024-09-02"
+
 [[lean_lib]]
 name = "ReflectionBench"
 precompileModules = true
+
+
+[[lean_exe]]
+name = "reflection-bench"
+root = "ReflectionBench.BenchOLean"
+supportInterpreter = true
