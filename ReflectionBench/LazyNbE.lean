@@ -84,6 +84,21 @@ private unsafe def primNatFuns : NameMap ((a1 a2 : Nat) → Val) :=
     (``Nat.shiftLeft , fun a1 a2 => .ofNat <| Nat.shiftLeft a1 a2),
     (``Nat.shiftRight, fun a1 a2 => .ofNat <| Nat.shiftRight a1 a2)]
 
+unsafe def app (v₁ v₂ : Val) : MetaM Val := do
+  match v₁ with
+  | .neutral e₁' ρ as =>
+    return .neutral e₁' ρ (as.push v₂)
+  | .closure arity t as f => do
+    let as' := as.push v₂
+    if as'.size < arity then
+      return .closure arity t as' f
+    else
+      assert! as'.size = arity
+      f as'
+  | .thunk _ _ _ =>
+    panic! "force returned thunk"
+  | v => throwError "Cannot apply value {v}"
+
 mutual
 -- Using a while loop to make sure it's tail recursive
 unsafe def force (genv : Environment) (lctx : LocalContext) (v : Val) : MetaM Val := do
@@ -120,19 +135,7 @@ unsafe def eval (genv : Environment) (lctx : LocalContext) (e : Expr) (ρ : List
       -- eval genv lctx e (vs.toListRev ++ ρ)
       mkThunk e (vs.toListRev ++ ρ)
   | .app e₁ e₂ =>
-      match (← force genv lctx (← eval genv lctx e₁ ρ)) with
-      | .neutral e₁' ρ as =>
-        return .neutral e₁' ρ (as.push (.neutral e₂ ρ #[]))
-      | .closure arity t as f => do
-        let as' := as.push (← mkThunk e₂ ρ)
-        if as'.size < arity then
-          return .closure arity t as' f
-        else
-          assert! as'.size = arity
-          f as'
-      | .thunk _ _ _ =>
-        panic! "force returned thunk"
-      | v => throwError "Cannot apply value {v}"
+      app (← force genv lctx (← eval genv lctx e₁ ρ)) (← mkThunk e₂ ρ)
   | .proj _ idx e =>
       match (← force genv lctx (← eval genv lctx e ρ)) with
       | .con _cn _us _ps fs =>
@@ -160,18 +163,18 @@ unsafe def eval (genv : Environment) (lctx : LocalContext) (e : Expr) (ρ : List
         let t := ci.type.instantiateLevelParams ci.levelParams us
         let e := ci.value.instantiateLevelParams ci.levelParams us
         let arity := e.getNumHeadLambdas
-        mkClosure arity t ρ fun vs => do
+        mkClosure arity t [] fun vs => do
           let e := getLambdaBodyN arity e
           eval genv lctx e vs.toListRev
       | .ctorInfo ci =>
         let t := ci.type.instantiateLevelParams ci.levelParams us
         let arity := ci.numParams + ci.numFields
-        mkClosure arity t ρ fun vs => do
+        mkClosure arity t [] fun vs => do
           return .con ci.name us vs[:ci.numParams] vs[ci.numParams:]
       | .recInfo ci =>
         let t := ci.type.instantiateLevelParams ci.levelParams us
         let arity :=ci.numParams + ci.numMotives + ci.numMinors + ci.numIndices + 1
-        mkClosure arity t ρ fun vs => do
+        mkClosure arity t [] fun vs => do
           let rargs : Array _ := vs[:ci.numParams + ci.numMotives + ci.numMinors]
           match (← force genv lctx vs.back) with
           | .con cn _us _as fs =>
@@ -199,13 +202,32 @@ unsafe def eval (genv : Environment) (lctx : LocalContext) (e : Expr) (ρ : List
               let rhs := getLambdaBodyN (rargs.size + 1) rhs
               eval genv lctx rhs ((.lit (.natVal (n-1))) :: rargs.toListRev ++ ρ)
 
-          | v => throwError "Cannot apply recursor to {v}"
-      | _ => return .neutral e ρ #[]
+          | v => throwError "Cannot apply recursor {ci.name} to {v}"
+      | .quotInfo ci =>
+        match ci.kind with
+        | .type => return .neutral e [] #[]
+        | .ctor =>
+          let t := ci.type.instantiateLevelParams ci.levelParams us
+          let arity := 3
+          mkClosure arity t [] fun vs => do
+            return .con ci.name us vs[:2] vs[2:]
+        | .lift | .ind =>
+          let t := ci.type.instantiateLevelParams ci.levelParams us
+          let arity := if ci.kind matches .lift then 6 else 5
+          mkClosure arity t [] fun vs => do
+            match (← force genv lctx vs.back) with
+            | .con cn _us _as fs =>
+              assert! cn = ``Quot.mk
+              assert! fs.size = 1
+              app (← force genv lctx vs[3]!) fs[0]!
+            | v => throwError "Cannot apply quot recursor {ci.name} to {v}"
+      | _ => return .neutral e [] #[]
   | .letE n t rhs b _ =>
     eval genv lctx (.app (.lam n t b .default) rhs) ρ
   | .lit l => return .lit l
   | .forallE .. => return .neutral e ρ #[]
   | .sort .. => return .neutral e ρ #[]
+  | .mdata _ e => eval genv lctx e ρ
   | _ => throwError "eval: unimplemented: {e}"
 end
 
@@ -230,19 +252,19 @@ unsafe def readback : Val → MetaM Expr
       Meta.mkLambdaFVars xs re
     return f.beta (← as.mapM readback)
 
-unsafe def lazyWhnfImpl (genv : Environment) (lctx : LocalContext) (e : Expr) : MetaM Expr := do
+unsafe def lazyNbeImpl (genv : Environment) (lctx : LocalContext) (e : Expr) : MetaM Expr := do
   let v ← eval genv lctx e []
   -- logInfo m!"Evaled, not forced: {v}"
   let v ← force genv lctx v
   -- logInfo m!"Forced: {v}"
   readback v
 
-@[implemented_by lazyWhnfImpl]
-opaque lazyWhnf (genv : Environment) (lctx : LocalContext) (e : Expr) : MetaM Expr
+@[implemented_by lazyNbeImpl]
+opaque lazyNbE (genv : Environment) (lctx : LocalContext) (e : Expr) : MetaM Expr
 
 elab "#nbe_reduce" t:term : command => Lean.Elab.Command.runTermElabM fun _ => do
   let e ← Lean.Elab.Term.elabTermAndSynthesize t none
-  let e'' ← lazyWhnf (← Lean.getEnv) (← Lean.getLCtx) e
+  let e'' ← lazyNbE (← Lean.getEnv) (← Lean.getLCtx) e
   -- Meta.check e''
   -- guard (← Meta.isDefEq e e'')
   Lean.logInfo m!"{e''}"

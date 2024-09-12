@@ -22,7 +22,7 @@ inductive StackElem
   | app : Nat → StackElem
   | proj : Name → Nat → StackElem
   | upd : Nat → StackElem
-  | rec_ : RecursorVal → List Level → Array Nat → StackElem
+  | rec_ : ConstantInfo → List Level → Array Nat → StackElem
   | nfNat : Nat → StackElem
   | primNat : Name → Option Nat → StackElem
 deriving Inhabited
@@ -40,17 +40,19 @@ instance : ToString StackElem where
 abbrev Stack := Array StackElem
 
 inductive Val
-  | con : Name → (arity fields : Nat) → List Level → Array Nat → Val -- primitive, maybe partially applied
-  | rec_ : RecursorVal → List Level → Array Nat → Val -- primitive, maybe partially applied
+  -- Partial applied constructor, recursor or quotient
+  | pap : ConstantInfo → List Level → (arity : Nat) → Array Nat → Val
+  -- Fully applied constructor
+  | con : Name → List Level → (params fields : Array Nat) → Val
   -- | vlam : Nat → Val → Val
   | elam : Name → Expr → Expr → BinderInfo → Val
   | lit : Lean.Literal → Val
   | primNat : Name → Option Nat → Val
 
 def Val.toString : Val → String
-  | .con cn _ _ _ as => s!"{cn} {as}"
+  | .pap ci _ _ as => s!"{ci.name} {as}"
+  | .con cn _ ps as => s!"{cn} {ps ++ as}"
   -- | .vlam n v => s!"λ^{n} ({v.toString})"
-  | .rec_ ci _ as => s!"{ci.name} {as}"
   | .elam n _ e _ => s!"λ {n}. {e}"
   | .lit l => (repr l).pretty
   | .primNat n .none => s!"{n}"
@@ -69,9 +71,9 @@ abbrev Heap := Array (HeapElem × Env)
 def Lean.ConstructorVal.arity (ci : ConstructorVal) : Nat :=
   ci.numParams + ci.numFields
 
--- Arity without the major premis
+-- Arity with the major premise
 def Lean.RecursorVal.arity (ci : RecursorVal) : Nat :=
-  ci.numParams + ci.numMotives + ci.numMinors + ci.numIndices
+  ci.numParams + ci.numMotives + ci.numMinors + ci.numIndices + 1
 
 partial def toVal (genv : Environment) : Expr → MetaM (Option Val)
   | .lam n t e bi => do
@@ -81,12 +83,16 @@ partial def toVal (genv : Environment) : Expr → MetaM (Option Val)
       match ci with
       | .defnInfo _ | .thmInfo _ =>
         return .none
-      | .ctorInfo ci =>
-        return .some (.con ci.name ci.arity ci.numFields us #[])
-      | .recInfo ci =>
-        return .some (.rec_ ci us #[])
-        -- let arity := ci.numParams + ci.numFields
-        -- return .some (.vlam arity (.con ci (Array.range ci.numFields)))
+      | .ctorInfo ctorInfo =>
+        if ctorInfo.arity = 0 then
+          return .some (.con ci.name us #[] #[])
+        else
+          return .some (.pap ci us ctorInfo.arity #[])
+      | .recInfo ri =>
+        return .some (.pap ci us ri.arity #[])
+      | .quotInfo qi =>
+        let arity := match qi.kind with | .type => 2 | .ctor => 3 | .lift => 6 | .ind => 5
+        return .some (.pap ci us arity #[])
       | _ => throwError "Unsupported constant info for {n}"
   | .lit l =>
     return .some (.lit l)
@@ -94,8 +100,8 @@ partial def toVal (genv : Environment) : Expr → MetaM (Option Val)
 
 mutual
 partial def ofVal (heap : Heap) (v : Val) (env : Env) : MetaM Expr := do match v with
-  | .con cn _ _ us args => return mkAppN (.const cn us) (← args.mapM (ofPos heap ·))
-  | .rec_ ci us args => return mkAppN (.const ci.name us) (← args.mapM (ofPos heap ·))
+  | .con cn us ps args => return mkAppN (.const cn us) (← (ps ++ args).mapM (ofPos heap ·))
+  | .pap ci us _ args => return mkAppN (.const ci.name us) (← args.mapM (ofPos heap ·))
   | .elam n t b bi => return (Expr.lam n t b bi).instantiate (← env.toArray.mapM (ofPos heap ·))
   | .lit t => return .lit t
   | .primNat n none => return .const n []
@@ -140,8 +146,8 @@ def checkExprConf (lctx : LocalContext) (heap : Heap) (e : Expr) (env : Env) (st
 def Val.ofNat (n : Nat) : Val := .lit (.natVal n)
 
 def Val.ofBool : Bool → Val
-  | true => .con ``Bool.true 0 0 [] #[]
-  | false => .con ``Bool.false 0 0 [] #[]
+  | true => .con ``Bool.true []  #[] #[]
+  | false => .con ``Bool.false [] #[] #[]
 
 def primNatFuns := #[
     ``Nat.add,
@@ -203,20 +209,24 @@ where
         go heap' (.value v) env stack
       | .app p =>
         match v with
-        | .con ci carity cfields us args =>
-          if args.size < carity then
-            go heap (.value (.con ci carity cfields us (args.push p))) env stack
+        | .pap ci us arity args =>
+          assert! args.size + 1 ≤ arity
+          if args.size + 1 < arity then
+            let args' := args.push p
+            go heap (.value (.pap ci us arity args')) env stack
           else
-            throwError "Constructor is over-applied" -- {← ofVal heap v env}"
-        | .rec_ ci us args =>
-          if args.size < ci.arity then
-            go heap (.value (.rec_ ci us (args.push p))) env stack
-          else if args.size == ci.arity then
-            go heap (.ind p) env (stack.push (.rec_ ci us args))
-          else
-            throwError "Over-applied recursor?"
-        -- | .vlam (n+1) v' =>
-        --  stepVal genv lctx heap (.vlam n v') (p :: env) stack.pop
+            match ci with
+            | .ctorInfo ci =>
+              let args' := args.push p
+              let ps := args'[:ci.numParams]
+              let fs := args'[ci.numParams:]
+              go heap (.value (.con ci.name us ps fs)) env stack
+            | .quotInfo {kind := .ctor, ..} =>
+              assert! arity = 3
+              go heap (.value (.con ci.name us args #[p])) env stack
+            | _ =>
+              -- all other .paps are strict in their last argument, so evaluate that
+              go heap (.ind p) env (stack.push (.rec_ ci us args))
         | .elam _ _ e' _ =>
           go heap (.thunk e') (p :: env) stack
         | .primNat n a? =>
@@ -224,48 +234,59 @@ where
         | _ => throwError "Cannot apply value {v}"
       | .proj _ idx =>
         match v with
-        | .con _cn arity fields _ args =>
-          if let some p := args[arity - fields  + idx]? then
+        | .con _cn _us _ps fs =>
+          if let some p := fs[idx]? then
             go heap (.ind p) env stack
           else
             throwError "Projection out of range"
         | _ => throwError "Cannot project value"
-      | .rec_ ri us args =>
-        assert! ri.arity == args.size
-        match v with
-        | .lit (.natVal n) =>
-          if ri.name = ``Nat.rec then
-            if n = 0 then
-              let rhs := ri.rules[0]!.rhs
-              let rhs := rhs.instantiateLevelParams ri.levelParams us
-              go heap (.thunk rhs) [] (stack ++ args.reverse.map (.app ·))
+      | .rec_ ci us args =>
+        match ci with
+        | .recInfo ri =>
+          assert! ri.arity == args.size + 1
+          match v with
+          | .lit (.natVal n) =>
+            if ri.name = ``Nat.rec then
+              if n = 0 then
+                let rhs := ri.rules[0]!.rhs
+                let rhs := rhs.instantiateLevelParams ri.levelParams us
+                go heap (.thunk rhs) [] (stack ++ args.reverse.map (.app ·))
+              else
+                let p := heap.size
+                let heap' := heap.push (.value (.lit (.natVal (n-1))), [])
+                let rhs := ri.rules[1]!.rhs
+                let rhs := rhs.instantiateLevelParams ri.levelParams us
+                go heap' (.thunk rhs) [] (stack ++ #[.app p] ++ args.reverse.map (.app ·))
             else
-              let p := heap.size
-              let heap' := heap.push (.value (.lit (.natVal (n-1))), [])
-              let rhs := ri.rules[1]!.rhs
-              let rhs := rhs.instantiateLevelParams ri.levelParams us
-              go heap' (.thunk rhs) [] (stack ++ #[.app p] ++ args.reverse.map (.app ·))
-          else
-            throwError "Cannot recurse on literal"
-        | .con cn arity fields _ cargs =>
-          let some rule := ri.rules.find? (·.ctor == cn)
-            | throwError "Unexpected constructor {cn} for recursor {ri.name}"
-          if ! cargs.size = arity then
-            throwError "Unsaturated constuctor {cn} analyzsed by {ri.name}"
-          else if ! rule.nfields = fields then
-            throwError "Arity mismatch: {cn} has {fields} but {ri.name} expects {rule.nfields}"
-          else
-            let rargs : Array Nat := args[:ri.numParams + ri.numMotives + ri.numMinors] ++ cargs[arity - fields:]
-            let rhs := rule.rhs.instantiateLevelParams ri.levelParams us
-            -- IO.eprint s!"Applying {ri.name} with args {rargs}\n"
-            go heap (.thunk rhs) [] (stack ++ rargs.reverse.map (.app ·))
-        | _ => throwError "Cannot recurse with {ri.name} on value {v}"
+              throwError "Cannot recurse on literal"
+          | .con cn _ _ps fs =>
+            let some rule := ri.rules.find? (·.ctor == cn)
+              | throwError "Unexpected constructor {cn} for recursor {ri.name}"
+            if ! rule.nfields = fs.size then
+              throwError "Arity mismatch: {cn} has {fs.size} but {ri.name} expects {rule.nfields} fields."
+            else
+              let rargs : Array Nat := args[:ri.numParams + ri.numMotives + ri.numMinors] ++ fs
+              let rhs := rule.rhs.instantiateLevelParams ri.levelParams us
+              -- IO.eprint s!"Applying {ri.name} with args {rargs}\n"
+              go heap (.thunk rhs) [] (stack ++ rargs.reverse.map (.app ·))
+          | _ => throwError "Cannot recurse with {ri.name} on value {v}"
+        | .quotInfo qi =>
+          unless qi.kind matches .ind || qi.kind matches .lift do
+            throwError "Unexpected quotient kind {qi.name}"
+          assert! args.size = 4 || args.size = 5
+          match v with
+          | .con cn _ _ps fs =>
+            assert! cn = ``Quot.mk
+            assert! fs.size = 1
+            go heap (.ind args[3]!) [] (stack.push (.app fs.back))
+          | _ => throwError "Cannot recurse with {qi.name} on value {v}"
+        | _ => throwError "Unexpected {ci.name} in rec_"
       | .nfNat n =>
         match v with
-        | .con cn _ _ _us args =>
+        | .con cn _us _ps fs =>
           if cn = ``Nat.succ then
-            assert! args.size = 1
-            go heap (.ind args[0]!) env (stack.push (.nfNat (n+1)))
+            assert! fs.size = 1
+            go heap (.ind fs[0]!) env (stack.push (.nfNat (n+1)))
           else if cn = ``Nat.zero then
             go heap (.value (.lit (.natVal n))) env stack
           else
@@ -329,4 +350,5 @@ where
             go heap (.thunk (ci.value.instantiateLevelParams ci.levelParams us)) [] stack
           | _ => throwError "Unimplemented constant: {e}"
       | .lam .. => unreachable!
-      | _ => throwError "Unimplemented: {e}"
+      | .mdata _ e => go heap (.thunk e) env stack
+      | _ => throwError "Unimplemented: {toString e}"
