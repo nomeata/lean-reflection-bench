@@ -10,19 +10,25 @@ partial def isReflProof (e : Expr) : Bool :=
   | id _ e => isReflProof e
   | _ => false
 
+def runWhnf (desc : String) (whnf : Environment → LocalContext → Expr → MetaM Expr) (e : Expr) : MetaM Unit:= do
+  try
+    let r ← whnf (← Lean.getEnv) (← Lean.getLCtx) e
+    unless r matches .const ``Bool.true [] do
+      throwError "Unexpected result {← ppExpr r}"
+  catch ex =>
+    let f ← Lean.MessageData.format (Lean.Exception.toMessageData ex)
+    IO.println f!"{desc} failed: {f}"
+
+def kernelWhnf (env : Environment) (lctx : LocalContext) (e : Expr) : MetaM Expr := do
+  Lean.ofExceptKernelException <| Lean.Kernel.whnf env lctx e
+
 def checkDecide (p inst eq : Expr) : MetaM Unit := do
   if isReflProof eq then
     let e' := mkApp2 (.const ``Decidable.decide []) p inst
-    IO.println f!"Found proof {← ppExpr p}"
-    let r1 ← Lean.ofExceptKernelException <| Lean.Kernel.whnf (← Lean.getEnv) (← Lean.getLCtx) e'
-    unless r1 matches .const ``Bool.true [] do
-      IO.println f!"Kernel.whnf reduces unexpectedly to {← ppExpr r1}"
-    let r2 ← lazyWhnf  (← Lean.getEnv) (← Lean.getLCtx) e'
-    unless r2 matches .const ``Bool.true [] do
-      IO.println f!"lazyWhnf reduces unexpectedly to {← ppExpr r2}"
-    let r3 ← LazyNbE.lazyNbE  (← Lean.getEnv) (← Lean.getLCtx) e'
-    unless r3 matches .const ``Bool.true [] do
-      IO.println f!"lazyNbE reduces unexpectedly to {← ppExpr r3}"
+    IO.println f!"Looking at {← ppExpr p}"
+    runWhnf "Kernel.whnf" kernelWhnf e'
+    runWhnf "lazyWhnf"    lazyWhnf e'
+    runWhnf "lazyNbE"     LazyNbE.lazyNbE e'
   else
       IO.println f!"ignoring proof {← ppExpr eq}"
 

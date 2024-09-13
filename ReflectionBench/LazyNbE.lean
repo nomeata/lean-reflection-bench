@@ -221,7 +221,12 @@ unsafe def eval (genv : Environment) (lctx : LocalContext) (e : Expr) (ρ : List
               assert! fs.size = 1
               app (← force genv lctx vs[3]!) fs[0]!
             | v => throwError "Cannot apply quot recursor {ci.name} to {v}"
-      | _ => return .neutral e [] #[]
+      | _ =>
+        -- This should work, but in Mathlib.GroupTheory.SpecificGroups.Alternating a proof
+        -- either takes too long or goes into a loop. For now, as we are interested
+        -- in fully reducing proofs, just throw
+        -- return .neutral e [] #[]
+        throwError "Unevaluatable constant {ci.name}"
   | .letE n t rhs b _ =>
     eval genv lctx (.app (.lam n t b .default) rhs) ρ
   | .lit l => return .lit l
@@ -256,7 +261,7 @@ unsafe def lazyNbeImpl (genv : Environment) (lctx : LocalContext) (e : Expr) : M
   let v ← eval genv lctx e []
   -- logInfo m!"Evaled, not forced: {v}"
   let v ← force genv lctx v
-  -- logInfo m!"Forced: {v}"
+  -- IO.println f!"Forced: {v}"
   readback v
 
 @[implemented_by lazyNbeImpl]
@@ -336,7 +341,7 @@ set_option pp.funBinderTypes true
 #nbe_reduce Nat.add (Nat.succ 42)
 
 opaque aNat : Nat
-/-- info: (Nat.succ 42).add aNat.succ -/
+/-- error: Unevaluatable constant Lean.LazyNbE.aNat -/
 #guard_msgs in
 #nbe_reduce Nat.add (Nat.succ 42) (Nat.succ aNat)
 
