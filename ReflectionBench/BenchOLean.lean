@@ -7,6 +7,7 @@ open Lean Meta
 partial def isReflProof (e : Expr) : Bool :=
   match_expr e with
   | Eq.refl _ _ => true
+  | rfl _ _ => true
   | id _ e => isReflProof e
   | _ => false
 
