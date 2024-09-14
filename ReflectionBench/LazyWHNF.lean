@@ -224,6 +224,12 @@ where
             | .quotInfo {kind := .ctor, ..} =>
               assert! arity = 3
               go heap (.value (.con ci.name us args #[p])) env stack
+            /-
+            This enables a check “Rule K” support. Unsound without checking the types, though!
+            | .recInfo {name := ``Eq.rec,..} =>
+              -- Hack: Make Eq.rec ignore the argument
+              go heap (.ind args[3]!) env stack
+            -/
             | _ =>
               -- all other .paps are strict in their last argument, so evaluate that
               go heap (.ind p) env (stack.push (.rec_ ci us args))

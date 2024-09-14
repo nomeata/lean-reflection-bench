@@ -32,6 +32,7 @@ def checkDecide (p inst eq : Expr) : MetaM Unit := do
   if isReflProof eq then
     let e' := mkApp2 (.const ``Decidable.decide []) p inst
     IO.println f!"Looking at {← ppExpr p}"
+    runWhnf "Meta.whnf"   (fun _ _ => whnf) e'
     runWhnf "Kernel.whnf" kernelWhnf e'
     runWhnf "lazyWhnf"    lazyWhnf e'
     runWhnf "lazyNbE"     LazyNbE.lazyNbE e'
