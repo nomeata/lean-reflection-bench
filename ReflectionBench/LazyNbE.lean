@@ -159,7 +159,7 @@ unsafe def eval (genv : Environment) (lctx : LocalContext) (e : Expr) (ρ : List
             return .neutral e [] vs
       else match ci with
       | .defnInfo ci | .thmInfo ci =>
-        -- logInfo m!"Unfolding {ci.name}"
+        -- IO.eprintln s!"Unfolding {ci.name}"
         let t := ci.type.instantiateLevelParams ci.levelParams us
         let e := ci.value.instantiateLevelParams ci.levelParams us
         let arity := e.getNumHeadLambdas
