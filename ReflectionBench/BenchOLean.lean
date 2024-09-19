@@ -11,7 +11,7 @@ partial def isReflProof (e : Expr) : Bool :=
   | id _ e => isReflProof e
   | _ => false
 
-def runWhnf (desc : String) (whnf : Environment → LocalContext → Expr → MetaM Expr) (e : Expr) : MetaM Unit:= do
+def runWhnf (desc : String) (whnf : Environment → LocalContext → Expr → MetaM Expr) (e : Expr) : MetaM Nat:= do
   let startT ← IO.monoMsNow
   try
     let r ← whnf (← Lean.getEnv) (← Lean.getLCtx) e
@@ -22,8 +22,7 @@ def runWhnf (desc : String) (whnf : Environment → LocalContext → Expr → Me
     IO.println f!"{desc} failed: {f}"
   let endT ← IO.monoMsNow
   let diffT := endT - startT
-  if diffT > 3 then
-    IO.println s!"{desc}: {endT - startT}ms"
+  return diffT
 
 def kernelWhnf (env : Environment) (lctx : LocalContext) (e : Expr) : MetaM Expr := do
   Lean.ofExceptKernelException <| Lean.Kernel.whnf env lctx e
@@ -31,11 +30,16 @@ def kernelWhnf (env : Environment) (lctx : LocalContext) (e : Expr) : MetaM Expr
 def checkDecide (p inst eq : Expr) : MetaM Unit := do
   if isReflProof eq then
     let e' := mkApp2 (.const ``Decidable.decide []) p inst
-    IO.println f!"Looking at {← ppExpr p}"
-    runWhnf "Meta.whnf"   (fun _ _ => whnf) e'
-    runWhnf "Kernel.whnf" kernelWhnf e'
-    runWhnf "lazyWhnf"    lazyWhnf e'
-    runWhnf "lazyNbE"     LazyNbE.lazyNbE e'
+    -- IO.println f!"Looking at {← ppExpr p}"
+    let stats ←
+      [ runWhnf "Meta.whnf"   (fun _ _ => whnf) e'
+      , runWhnf "Kernel.whnf" kernelWhnf e'
+      , runWhnf "lazyWhnf"    lazyWhnf e'
+      , runWhnf "lazyNbE"     LazyNbE.lazyNbE e'
+      ].mapM id
+    if stats.any (· > 5) then
+      IO.println f!"Looking at {← ppExpr p}"
+      IO.println f!"Stats: {stats}"
   else
       IO.println f!"ignoring proof {← ppExpr eq}"
 

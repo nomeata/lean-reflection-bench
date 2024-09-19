@@ -10,7 +10,6 @@ rev = "nightly-testing-2024-09-02"
 name = "ReflectionBench"
 precompileModules = true
 
-
 [[lean_exe]]
 name = "reflection-bench"
 root = "ReflectionBench.BenchOLean"

@@ -4,7 +4,7 @@ import Qq
 
 open Lean
 
-def exp : Nat := 4
+def exp : Nat := 8
 
 def list : List Nat := by
   run_tac
@@ -57,6 +57,7 @@ elab "prove_list_tac" : tactic =>
 
 set_option maxRecDepth 2000
 
+/-
 set_option trace.profiler true in
 def test1 : ∀ n < 2^exp, list.get? n = Option.some n := by decide
 -- 3.301 s
@@ -64,6 +65,8 @@ def test1 : ∀ n < 2^exp, list.get? n = Option.some n := by decide
 set_option trace.profiler true in
 def test2 : ∀ n < 2^exp, list.get? n = Option.some n := by unfold list; prove_list_tac
 -- 0.928 s
+
+-/
 
 /-
 -- Could build the same proof object using tactics, but too slow
@@ -77,7 +80,10 @@ def test3 : ∀ n < 2^exp, list.get? n = Option.some n := by
 
 def test : Bool := decide (∀ n < 2^exp, list.get? n = Option.some n)
 
--- several seconds:
-#time #kernel_reduce test
 #time #lazy_reduce   test
-#time #nbe_reduce    test
+
+def foo := @List.get?.eq_unfold
+
+-- #time #kernel_reduce test
+#time #lazy_reduce   test
+--#time #nbe_reduce    test
