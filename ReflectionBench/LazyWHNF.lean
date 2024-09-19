@@ -194,22 +194,19 @@ def evalPrimNat (n : Name) (a1 a2 : Nat) : Val := match n with
   | _         => .ofNat 42
 
 -- the lean compiler cannot do tail-call optimization for mutually recursive functions,
--- so instead of three functions we write one `go` function with a “tag” argument,
+-- so instead of two functions we write one `go` function with a “tag” argument,
 -- and arguments whose type depends on that. Originally it was a simple inductive data type,
 -- but allocating and freeing on every call was a 6% overhead.
 
-inductive GoTag where | exp | value | ptr
+inductive GoTag where | exp | value
 
 def GoArg1 (t : GoTag) := match t with
   | .exp => Expr
   | .value => Val
-  | .ptr => Nat
 
 def GoArg2 (t : GoTag) := match t with
   | .exp => LMap
   | .value => Unit
-  | .ptr => Unit
-
 
 partial def lazyWhnf (genv : Environment) (_lctx : LocalContext) (e : Expr) : MetaM Expr := do
   go #[] .exp e #[] [] #[]
@@ -217,10 +214,8 @@ where
   go (heap : Heap) (t : GoTag) (x1 : GoArg1 t) (x2 : GoArg2 t) (env : Env) (stack : Stack) : MetaM Expr := do
   let goVal heap v env stack := go heap .value v () env stack
   let goExp heap e lmap env stack := go heap .exp e lmap env stack
-  let goPtr heap v stack := go heap .ptr v () [] stack --NB env does not matter
-  match t with
-  | .ptr =>
-    let p : Nat := x1
+
+  let goPtr heap p stack :=
     let (he, env') := heap[p]!
     match he with
     | .thunk e lm =>
@@ -230,6 +225,7 @@ where
     | .value v =>
       goVal heap v env' stack
 
+  match t with
   | .value =>
     let v : Val := x1
 
