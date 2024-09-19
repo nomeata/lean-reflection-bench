@@ -202,8 +202,12 @@ where
   match he with
   | .ind p =>
     let (he, env') := heap[p]!
-    let stack' := if he matches .thunk _ _ then stack.push (.upd p) else stack
-    go heap he env' stack'
+    if he matches .thunk _ _ then
+      let heap' := heap.set! p default -- blackholing
+      let stack' := stack.push (.upd p)
+      go heap' he env' stack'
+    else
+      go heap he env' stack
 
   | .value v =>
 
@@ -238,7 +242,7 @@ where
               assert! arity = 3
               go heap (.value (.con ci.name us lmap args #[p])) env stack
             /-
-            This enables a check “Rule K” support. Unsound without checking the types, though!
+            This enables cheap “Rule K” support. Unsound without checking the types, though!
             | .recInfo {name := ``Eq.rec,..} =>
               -- Hack: Make Eq.rec ignore the argument
               go heap (.ind args[3]!) env stack
