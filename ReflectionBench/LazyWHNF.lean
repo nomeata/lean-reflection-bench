@@ -193,6 +193,11 @@ def evalPrimNat (n : Name) (a1 a2 : Nat) : Val := match n with
   | ``Nat.shiftRight => .ofNat <| Nat.shiftRight a1 a2
   | _         => .ofNat 42
 
+-- the lean compiler cannot do tail-call optimization for mutually recursive functions,
+-- so instead of three functions we write one `go` function with a “tag” argument,
+-- and arguments whose type depends on that. Originally it was a simple inductive data type,
+-- but allocating and freeing on every call was a 6% overhead.
+
 inductive GoTag where | exp | value | ptr
 
 def GoArg1 (t : GoTag) := match t with
@@ -210,6 +215,9 @@ partial def lazyWhnf (genv : Environment) (_lctx : LocalContext) (e : Expr) : Me
   go #[] .exp e #[] [] #[]
 where
   go (heap : Heap) (t : GoTag) (x1 : GoArg1 t) (x2 : GoArg2 t) (env : Env) (stack : Stack) : MetaM Expr := do
+  let goVal heap v env stack := go heap .value v () env stack
+  let goExp heap e lmap env stack := go heap .exp e lmap env stack
+  let goPtr heap v stack := go heap .ptr v () [] stack --NB env does not matter
   match t with
   | .ptr =>
     let p : Nat := x1
@@ -218,9 +226,9 @@ where
     | .thunk e lm =>
       let heap' := heap.set! p default -- blackholing
       let stack' := stack.push (.upd p)
-      go heap' .exp e lm env' stack'
+      goExp heap' e lm env' stack'
     | .value v =>
-      go heap .value v () env' stack
+      goVal heap v env' stack
 
   | .value =>
     let v : Val := x1
@@ -237,24 +245,24 @@ where
       match se with
       | .upd p =>
         let heap' := heap.set! p (.value v, env)
-        go heap' .value v () env stack
+        goVal heap' v env stack
       | .app p =>
         match v with
         | .pap ci us lmap arity args =>
           assert! args.size + 1 ≤ arity
           if args.size + 1 < arity then
             let args' := args.push p
-            go heap .value (.pap ci us lmap arity args') () env stack
+            goVal heap (.pap ci us lmap arity args') env stack
           else
             match ci with
             | .ctorInfo ci =>
               let args' := args.push p
               let ps := args'[:ci.numParams]
               let fs := args'[ci.numParams:]
-              go heap .value (.con ci.name us lmap ps fs) () env stack
+              goVal heap (.con ci.name us lmap ps fs) env stack
             | .quotInfo {kind := .ctor, ..} =>
               assert! arity = 3
-              go heap .value (.con ci.name us lmap args #[p]) () env stack
+              goVal heap (.con ci.name us lmap args #[p]) env stack
             /-
             This enables cheap “Rule K” support. Unsound without checking the types, though!
             | .recInfo {name := ``Eq.rec,..} =>
@@ -263,17 +271,17 @@ where
             -/
             | _ =>
               -- all other .paps are strict in their last argument, so evaluate that
-              go heap .ptr p () env (stack.push (.rec_ ci us lmap args))
+              goPtr heap p (stack.push (.rec_ ci us lmap args))
         | .elam _ _ e' lmap _ =>
-          go heap .exp e' lmap (p :: env) stack
+          goExp heap e' lmap (p :: env) stack
         | .primNat n a? =>
-          go heap .ptr p () env (stack.push (.primNat n a?) |>.push (.nfNat 0))
+          goPtr heap p (stack.push (.primNat n a?) |>.push (.nfNat 0))
         | _ => throwError "Cannot apply value {v}"
       | .proj _ idx =>
         match v with
         | .con _cn _us _lmap _ps fs =>
           if let some p := fs[idx]? then
-            go heap .ptr p () env stack
+            goPtr heap p stack
           else
             throwError "Projection out of range"
         | _ => throwError "Cannot project value"
@@ -288,14 +296,14 @@ where
                 let rhs := ri.rules[0]!.rhs
                 let lmap := lmap.push (ri.levelParams, us)
                 -- let rhs := rhs.instantiateLevelParams ri.levelParams us
-                go heap .exp rhs lmap [] (stack ++ args.reverse.map (.app ·))
+                goExp heap rhs lmap [] (stack ++ args.reverse.map (.app ·))
               else
                 let p := heap.size
                 let heap' := heap.push (.value (.lit (.natVal (n-1))), [])
                 let lmap := lmap.push (ri.levelParams, us)
                 let rhs := ri.rules[1]!.rhs
                 -- let rhs := rhs.instantiateLevelParams ri.levelParams us
-                go heap' .exp rhs lmap [] (stack ++ #[.app p] ++ args.reverse.map (.app ·))
+                goExp heap' rhs lmap [] (stack ++ #[.app p] ++ args.reverse.map (.app ·))
             else
               throwError "Cannot recurse on literal"
           | .con cn _ _ _ps fs =>
@@ -309,7 +317,7 @@ where
                 let lmap := lmap.push (ri.levelParams, us)
               -- let rhs := rule.rhs.instantiateLevelParams ri.levelParams us
               -- IO.eprint s!"Applying {ri.name} with args {rargs}\n"
-              go heap .exp rhs lmap [] (stack ++ rargs.reverse.map (.app ·))
+              goExp heap rhs lmap [] (stack ++ rargs.reverse.map (.app ·))
           | _ => throwError "Cannot recurse with {ri.name} on value {v}"
         | .quotInfo qi =>
           unless qi.kind matches .ind || qi.kind matches .lift do
@@ -319,7 +327,7 @@ where
           | .con cn _ _ _ps fs =>
             assert! cn = ``Quot.mk
             assert! fs.size = 1
-            go heap .ptr args[3]! () [] (stack.push (.app fs.back))
+            goPtr heap args[3]! (stack.push (.app fs.back))
           | _ => throwError "Cannot recurse with {qi.name} on value {v}"
         | _ => throwError "Unexpected {ci.name} in rec_"
       | .nfNat n =>
@@ -327,24 +335,24 @@ where
         | .con cn _us _ _ps fs =>
           if cn = ``Nat.succ then
             assert! fs.size = 1
-            go heap .ptr fs[0]! () env (stack.push (.nfNat (n+1)))
+            goPtr heap fs[0]! (stack.push (.nfNat (n+1)))
           else if cn = ``Nat.zero then
-            go heap .value (.lit (.natVal n)) () env stack
+            goVal heap (.lit (.natVal n)) env stack
           else
             throwError "Unexpcted constructor in nfNat: {v}"
         | .lit (.natVal m) =>
-            go heap .value (.lit (.natVal (m + n))) () env stack
+            goVal heap (.lit (.natVal (m + n))) env stack
         | _ =>
             throwError "Unexpcted value in nfNat: {v}"
       | .primNat f none =>
         match v with
         | .lit (.natVal m) =>
-            go heap .value (.primNat f m) () env stack
+            goVal heap (.primNat f m) env stack
         | _ => throwError "Unexpected value in primNat"
       | .primNat f (some m) =>
         match v with
         | .lit (.natVal n) =>
-            go heap .value (evalPrimNat f m n) () env stack
+            goVal heap (evalPrimNat f m n) env stack
         | _ => throwError "Unexpected value in primNat"
 
   | .exp =>
@@ -353,37 +361,37 @@ where
     -- IO.eprint s!"⊢ {e}\n"
     -- checkExprConf lctx heap e env stack
     if let some v ← toVal genv lmap e then
-      go heap .value v () env stack
+      goVal heap v env stack
     else
       match e with
       | .bvar i =>
         if let some p := env[i]? then
-          go heap .ptr p () env stack
+          goPtr heap p stack
         else
           throwError "Bound variable {i} not supported yet (env: {env})"
       | .letE _n _t v b _ =>
         let p := heap.size
         let heap' := heap.push (.thunk v lmap, env)
         let env' := p :: env
-        go heap' .exp b lmap env' stack
+        goExp heap' b lmap env' stack
       | .app f a =>
         if let .bvar i := a then
           if let some p := env[i]? then
-            go heap .exp f lmap env (stack.push (.app p))
+            goExp heap f lmap env (stack.push (.app p))
           else
             throwError "Bound variable {i} not supported yet (env: {env})"
         else
           let p := heap.size
           let heap' := heap.push (.thunk a lmap, env)
-          go heap' .exp f lmap env (stack.push (.app p))
+          goExp heap' f lmap env (stack.push (.app p))
       | .proj n i b =>
         let stack' := stack.push (.proj n i)
-        go heap .exp b lmap env stack'
+        goExp heap b lmap env stack'
       | .const n us => do
           let some ci := genv.find? n | throwError "Did not find {n}"
           if primNatFuns.contains n then
             -- IO.eprint s!"Unfolding {n} (primitive)\n"
-            go heap .value (.primNat n none) () [] stack
+            goVal heap (.primNat n none) [] stack
           else
           /-
           match genv.find? (n ++ `eq_unfold) with
@@ -391,7 +399,7 @@ where
             let .some (_, .const _ _, val) := ufci.type.eq?
               | throwError "Unexpected unfolding lemma : {ufci.name} : {ufci.type}\n"
             let lmap := lmap.push (ci.levelParams, us)
-            go heap .exp val lmap [] stack
+            goExp heap val lmap [] stack
           | _ =>
           -/
           match ci with
@@ -399,10 +407,10 @@ where
             -- IO.eprint s!"Unfolding {ci.name}\n"
             let val := ci.value
             let lmap := lmap.push (ci.levelParams, us)
-            go heap .exp val lmap [] stack
+            goExp heap val lmap [] stack
           | _ => throwError "Unimplemented constant: {e}"
       | .lam .. => unreachable!
-      | .mdata _ e => go heap .exp e lmap env stack
+      | .mdata _ e => goExp heap e lmap env stack
       | _ => throwError "Unimplemented: {toString e}"
 
 elab "#lazy_reduce" t:term : command => Lean.Elab.Command.runTermElabM fun _ => do
