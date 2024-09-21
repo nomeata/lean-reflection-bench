@@ -7,7 +7,9 @@ import Lean4Lean.ForEachExprV
 import Lean4Lean.EquivManager
 
 /-!
-This is a copy of Lean4Lean.TypeChecker, with the Monad `M` allowing `IO` inside.
+This is a copy of Lean4Lean.TypeChecker, with
+* the Monad `M` allowing `IO` inside.
+* `lparams` being an `Option`
 -/
 
 namespace Lean
@@ -27,7 +29,7 @@ structure TypeChecker.Context where
   env : Environment
   lctx : LocalContext := {}
   safety : DefinitionSafety := .safe
-  lparams : List Name := []
+  lparams : Option (List Name) := none
 
 namespace TypeChecker
 
@@ -84,8 +86,9 @@ def ensureForallCore (e s : Expr) : RecM Expr := do
   throw <| .funExpected (← getEnv) (← getLCtx) s
 
 def checkLevel (tc : Context) (l : Level) : Except KernelException Unit := do
-  if let some n2 := l.getUndefParam tc.lparams then
-    throw <| .other s!"invalid reference to undefined universe level parameter '{n2}'"
+  if let some lps := tc.lparams then
+    if let some n2 := l.getUndefParam lps then
+      throw <| .other s!"invalid reference to undefined universe level parameter '{n2}'"
 
 def inferFVar (tc : Context) (name : FVarId) : Except KernelException Expr := do
   if let some decl := tc.lctx.find? name then
@@ -716,7 +719,7 @@ def Methods.withFuel : Nat → Methods
 
 def RecM.run (x : RecM α) : M α := x (Methods.withFuel 1000)
 
-def check (e : Expr) (lps : List Name) : M Expr :=
+def check (e : Expr) (lps : Option (List Name)) : M Expr :=
   withReader ({ · with lparams := lps }) (inferType e (inferOnly := false)).run
 
 def whnf (e : Expr) : M Expr := (Inner.whnf e).run

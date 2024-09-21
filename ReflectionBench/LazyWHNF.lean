@@ -1,4 +1,6 @@
 import Lean
+import ReflectionBench.TypeChecker
+
 /-
 
 Rough notes
@@ -21,7 +23,7 @@ abbrev Env := List Nat
 abbrev LMap := Array (List Name × List Level)
 
 def Lean.Expr.instLMap (e : Expr) (lmap : LMap) :=
-  -- TODO: foldl or foldr
+  -- TODO: Cheaper to keep just one mapping and apply to its domain eagerly?
   lmap.foldr (fun (us, ls) e => e.instantiateLevelParams us ls) e
 
 inductive StackElem
@@ -110,7 +112,8 @@ partial def toVal (genv : Environment) (lmap : LMap) (e : Expr) : MetaM (Option 
           return .some (.con ci.name us lmap #[] #[])
         else
           return .some (.pap ci us lmap ii.arity #[])
-      | _ => throwError "Unsupported constant info for {n}"
+      | .opaqueInfo _ | .axiomInfo _ =>
+        return .some (.neutral e lmap)
   | .lit l =>
     return .some (.lit l)
   | .sort .. | .forallE .. =>
@@ -181,12 +184,28 @@ def ofPos (heap : Heap) (p : Nat) : IO Expr := ReadBackM.run heap (readBackPtr p
 def ofConf (heap : Heap) (v : Val) (env : Env) (stack : Stack) : MetaM Expr := ReadBackM.run heap do
   readBackStack (← readBackVal v env) stack
 
+-- set_option trace.Meta.isDefEq.constApprox
+
+def Lean4Lean.check (e : Expr) : MetaM Bool := do
+  let r ← TypeChecker.M.run (← getEnv) .safe (← getLCtx) do
+     TypeChecker.check e .none
+  return r.isOk
+
 def checkValConf (heap : Heap) (v : Val) (env : Env) (stack : Stack) : MetaM Unit := do
   let le ← ofConf heap v env stack
   -- IO.eprint s!"Evaluating:\n{le}\nstack: {stack}\nheap: {heap}\n"
-  unless (← withCurrHeartbeats (Meta.isTypeCorrect le)) do
-    -- IO.eprint s!"Not typecorrect:\n{le}\nstack: {stack}\nheap: {heap}\n"
-    Meta.check le
+  Meta.withTransparency .all <| withCurrHeartbeats <| do
+      unless (← Lean4Lean.check le) do
+        -- IO.eprint s!"Not typecorrect:\n{le}\nstack: {stack}\nheap: {heap}\n"
+        withOptions (·.set `trace.Meta.isDefEq true) do
+        withOptions (·.set `trace.Meta.isDefEq.assign true) do
+        withOptions (·.set `trace.Meta.isDefEq.cache true) do
+        withOptions (·.set `trace.Meta.isDefEq.delta true) do
+        withOptions (·.set `trace.Meta.isDefEq.constApprox true) do
+            Meta.check le
+
+def checkExprConf (heap : Heap) (e : Expr) (lmap : LMap) (env : Env) (stack : Stack) : MetaM Unit := do
+  checkValConf heap (.neutral e lmap) env stack
 
 def Val.ofNat (n : Nat) : Val := .lit (.natVal n)
 
@@ -399,7 +418,7 @@ where
     let e : Expr := x1
     let lmap : LMap := x2
     -- IO.eprint s!"⊢ {e}\n"
-    -- checkExprConf lctx heap e env stack
+    -- checkExprConf heap e lmap env stack
     if let some v ← toVal genv lmap e then
       goVal heap v env stack
     else
@@ -533,7 +552,7 @@ set_option pp.funBinderTypes true
 #lazy_reduce Nat.add (Nat.succ 42)
 
 opaque aNat : Nat
-/-- error: Unsupported constant info for aNat -/
+/-- info: Nat.add 43 (aNat + 1) -/
 #guard_msgs in
 #lazy_reduce Nat.add (Nat.succ 42) (Nat.succ aNat)
 

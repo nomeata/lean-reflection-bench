@@ -15,19 +15,27 @@ partial def isReflProof (e : Expr) : Bool :=
 def kernelWhnf (env : Environment) (lctx : LocalContext) (e : Expr) : MetaM Expr := do
   Lean.ofExceptKernelException <| Lean.Kernel.whnf env lctx e
 
+def lean4LeanCheck (e : Expr) : MetaM Unit := do
+  let r ← TypeChecker.M.run (← getEnv) .safe (← getLCtx) do
+      TypeChecker.check e .none
+  let _ ← Lean.ofExceptKernelException r
+
 def runWhnf (desc : String) (whnf : Environment → LocalContext → Expr → MetaM Expr) (e : Expr) : MetaM Nat:= do
-  let startT ← IO.monoMsNow
   try
+    let startT ← IO.monoMsNow
     let r ← whnf (← Lean.getEnv) (← Lean.getLCtx) e
     let endT ← IO.monoMsNow
-    try check r
+    try withOptions (smartUnfolding.set ·  false) (Meta.check r)
     catch ex =>
       withOptions (pp.universes.set · true) do
+      withOptions (pp.explicit.set · true) do
         IO.println f!"{desc} reduced\n{← ppExpr e}\nto type-incorrect\n{← ppExpr r}\n{← ex.toMessageData.format}"
+    /-
     let r' ← kernelWhnf (← Lean.getEnv) (← Lean.getLCtx) e
-    unless (← isDefEqGuarded r r') do
+    unless (← withTransparency .all <| isDefEqGuarded r r') do
       withOptions (pp.universes.set · true) do
         IO.println f!"{desc} reduced\n{← ppExpr e}\nto\n{← ppExpr r}\nnot defeq to \n{← ppExpr r'}"
+    -/
     let diffT := endT - startT
     return diffT
   catch ex =>
@@ -104,8 +112,7 @@ opaque wrappedMethods : TypeChecker.Methods := TypeChecker.Methods.withFuel 0
 
 
 def checkWithLean4Lean (e : Expr) (lps : List Name) : MetaM Unit := do
-  let env ← getEnv
-  let r ← TypeChecker.M.run env .safe {} do
+  let r ← TypeChecker.M.run (← getEnv) .safe {} do
     withReader ({ · with lparams := lps }) do
       ReaderT.run (r := wrappedMethods) do
           TypeChecker.Inner.inferType e (inferOnly := false)
