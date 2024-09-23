@@ -39,17 +39,18 @@ def runWhnf (desc : String) (whnf : Environment → LocalContext → Expr → Me
     let startT ← IO.monoNanosNow
     let r ← whnf env lctx e
     let endT ← IO.monoNanosNow
-    try withOptions (smartUnfolding.set ·  false) (Meta.check r)
+    try withCurrHeartbeats <| withOptions (smartUnfolding.set ·  false) <| Meta.check r
     catch ex =>
-      withOptions (pp.universes.set · true) do
-      withOptions (pp.explicit.set · true) do
+      -- withOptions (pp.universes.set · true) do
+      -- withOptions (pp.explicit.set · true) do
         IO.println f!"{desc} reduced\n{← ppExpr e}\nto type-incorrect\n{← ppExpr r}\n{← ex.toMessageData.format}"
-    /-
+
     let r' ← kernelWhnf (← Lean.getEnv) (← Lean.getLCtx) e
-    unless (← withTransparency .all <| isDefEqGuarded r r') do
-      withOptions (pp.universes.set · true) do
+    unless (← withOptions (smartUnfolding.set ·  false) <| withTransparency .all <| isDefEqGuarded r r') do
+      -- withOptions (pp.universes.set · true) do
+      withOptions (pp.deepTerms.set · true) do
         IO.println f!"{desc} reduced\n{← ppExpr e}\nto\n{← ppExpr r}\nnot defeq to \n{← ppExpr r'}"
-    -/
+
     let diffT := endT - startT
     return .some diffT
   catch ex =>
@@ -69,7 +70,7 @@ def checkWhnf (stats : IO.Ref Stats) (module decl : String) (e : Expr) : MetaM U
     let lazyWhnfTime ← runWhnf "lazyWhnf" lazyWhnf e
     let stat : Stat := { module, decl, inputSize, kernelTime, lazyWhnfTime }
     stats.modify (·.push stat)
-    if lazyWhnfTime.any (· > 5000000) then
+    if kernelTime > 5000000 ∨ lazyWhnfTime.any (· > 5000000) then
       IO.println f!"Looking at {← ppExpr e}:"
       IO.println f!"{toJson stat}"
 
@@ -192,6 +193,14 @@ unsafe def main (args : List String) : IO UInt32 := do
         IO.println s!"Processing {mod}"
         checkConstInfos stats mod.toString cis
   let filename := "stats.json"
-  IO.println s!"Writing {(←stats.get).size} statistics to {filename}."
-  IO.FS.writeFile filename (toJson (← stats.get)).pretty
+  let s ← stats.get
+  IO.println s!"Writing {s.size} statistics to {filename}."
+  IO.FS.writeFile filename (toJson s).pretty
+  let (bad, good) := s.partition (·.lazyWhnfTime.isNone)
+  IO.println s!"Of these, {bad.size} failed to compute."
+
+  let totalKernel : Nat := good.foldl (·+ ·.kernelTime) 0 / 1000000
+  let totalLazyWhnf : Nat := good.foldl (·+ ·.lazyWhnfTime.get!) 0 / 1000000
+  let frac : Float := .ofNat totalLazyWhnf / .ofNat totalKernel * 100
+  IO.println s!"Total kernel: {totalKernel}ms, Total lazyWhnf: {totalLazyWhnf}ms ({frac}%)"
   return 0

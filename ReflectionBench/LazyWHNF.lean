@@ -323,11 +323,23 @@ where
             | .quotInfo {kind := .ctor, ..} =>
               assert! arity = 3
               goVal heap (.con ci.name us lmap args #[p]) env stack
-            -- This hack enables cheap “Rule K” support. Unsound without checking the types, though!
-            /-
             | .recInfo {name := ``Eq.rec,..} =>
-              goPtr heap args[3]! stack
-            -/
+              if false then
+                -- This implemens the “fast rule K” without conversion checking
+                goPtr heap args[3]! stack
+              else
+                -- This implements rule K. We have to read back here!
+                let (t1, t2) ← ReadBackM.run heap do
+                  let t1 ← readBackPtr args[1]!
+                  let t2 ← readBackPtr args[4]!
+                  return (t1, t2)
+                -- IO.println f!"Rule K: {← Meta.ppExpr t1} =?= {← Meta.ppExpr t2}"
+                match Kernel.isDefEq genv _lctx t1 t2 with
+                | .ok true =>
+                  goPtr heap args[3]! stack
+                | _ =>
+                  -- IO.println f!"Rule K failed:\n{← Meta.ppExpr t1}\n=?=¬{← Meta.ppExpr t2}"
+                  goPtr heap p (stack.push (.rec_ ci us lmap args))
             | _ =>
               -- all other .paps are strict in their last argument, so evaluate that
               goPtr heap p (stack.push (.rec_ ci us lmap args))
