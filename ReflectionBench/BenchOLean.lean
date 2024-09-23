@@ -5,6 +5,17 @@ import ReflectionBench.TypeChecker
 
 open Lean Meta
 
+structure Stat where
+  module : String -- no Name, we must not reference anything from the olean
+  decl : String
+  inputSize : Nat
+  kernelTime : Nat
+  lazyWhnfTime : Option Nat
+  -- outputSize : Option Nat
+deriving ToJson, Repr
+
+abbrev Stats := Array Stat
+
 partial def isReflProof (e : Expr) : Bool :=
   match_expr e with
   | Eq.refl _ _ => true
@@ -20,11 +31,14 @@ def lean4LeanCheck (e : Expr) : MetaM Unit := do
       TypeChecker.check e .none
   let _ ← Lean.ofExceptKernelException r
 
-def runWhnf (desc : String) (whnf : Environment → LocalContext → Expr → MetaM Expr) (e : Expr) : MetaM Nat:= do
+def runWhnf (desc : String) (whnf : Environment → LocalContext → Expr → MetaM Expr) (e : Expr) : MetaM (Option Nat) := do
   try
-    let startT ← IO.monoMsNow
-    let r ← whnf (← Lean.getEnv) (← Lean.getLCtx) e
-    let endT ← IO.monoMsNow
+    let env ← getEnv
+    let lctx ← getLCtx
+    let _ ← whnf env lctx e -- warm up
+    let startT ← IO.monoNanosNow
+    let r ← whnf env lctx e
+    let endT ← IO.monoNanosNow
     try withOptions (smartUnfolding.set ·  false) (Meta.check r)
     catch ex =>
       withOptions (pp.universes.set · true) do
@@ -37,7 +51,7 @@ def runWhnf (desc : String) (whnf : Environment → LocalContext → Expr → Me
         IO.println f!"{desc} reduced\n{← ppExpr e}\nto\n{← ppExpr r}\nnot defeq to \n{← ppExpr r'}"
     -/
     let diffT := endT - startT
-    return diffT
+    return .some diffT
   catch ex =>
     let f ← Lean.MessageData.format (Lean.Exception.toMessageData ex)
     withOptions (pp.explicit.set · true) do
@@ -45,43 +59,43 @@ def runWhnf (desc : String) (whnf : Environment → LocalContext → Expr → Me
       let r' ← Meta.whnf e -- kernelWhnf (← Lean.getEnv) (← Lean.getLCtx) e
     -- unless r matches .const ``Bool.true [] do
       IO.println f!"Expected result {← ppExpr r'}"
-    return 0
+    return .none
 
-def checkWhnf (e : Expr) : MetaM Unit := do
+def checkWhnf (stats : IO.Ref Stats) (module decl : String) (e : Expr) : MetaM Unit := do
     -- IO.println f!"Looking at {← ppExpr e}"
-    let stats ←
-      -- runWhnf "Meta.whnf"   (fun _ _ => whnf) e
-      [ runWhnf "Kernel.whnf" kernelWhnf e
-      , runWhnf "lazyWhnf"    lazyWhnf e
-      -- , runWhnf "lazyNbE"     LazyNbE.lazyNbE e
-      ].mapM id
-    if stats.any (· > 5) then
-      IO.println f!"Looking at {← ppExpr e}"
-      IO.println f!"Stats: {stats}"
+    let inputSize ← e.numObjs
+    let .some kernelTime ← runWhnf "Kernel.whnf" kernelWhnf e
+      | IO.println f!"Kernel.whnf failed?"
+    let lazyWhnfTime ← runWhnf "lazyWhnf" lazyWhnf e
+    let stat : Stat := { module, decl, inputSize, kernelTime, lazyWhnfTime }
+    stats.modify (·.push stat)
+    if lazyWhnfTime.any (· > 5000000) then
+      IO.println f!"Looking at {← ppExpr e}:"
+      IO.println f!"{toJson stat}"
 
-def checkDecide (p inst eq : Expr) : MetaM Unit := do
+def checkDecide (stats : IO.Ref Stats) (mod declName : String) (p inst eq : Expr) : MetaM Unit := do
   if isReflProof eq then
     let e' := mkApp2 (.const ``Decidable.decide []) p inst
-    checkWhnf e'
+    checkWhnf stats mod declName e'
   else
       IO.println f!"ignoring proof {← ppExpr eq}"
 
-def hasInterestingFunction (e : Expr) : Bool :=
+def hasByDecideProof (e : Expr) : Bool :=
   Option.isSome <| e.find? fun e =>
        e.isAppOfArity ``of_decide_eq_true 3
     || e.isAppOfArity ``eq_true_of_decide 3
 
-def checkBody (e : Expr) : MetaM Unit := do
-  if hasInterestingFunction e then
+def checkBody (stats : IO.Ref Stats) (mod declName : String) (e : Expr) : MetaM Unit := do
+  if hasByDecideProof e then
     let _ ← transform e (skipConstInApp := true) fun e => do
       match_expr e with
-      | of_decide_eq_true p inst eq => checkDecide p inst eq
-      | eq_true_of_decide p inst eq => checkDecide p inst eq
+      | of_decide_eq_true p inst eq => checkDecide stats mod declName p inst eq
+      | eq_true_of_decide p inst eq => checkDecide stats mod declName p inst eq
       | _ => pure ()
       return .continue
   return
 
-def whnfHook (e : Expr) : TypeChecker.M Unit := do
+def whnfHook (sref : IO.Ref Stats) (mod decl : String) (e : Expr) : TypeChecker.M Unit := do
   unless e.isSort || e.isLambda || e.isLit || e.isForall do
   -- don't run if already cached
   if let some _ := (← get).whnfCache[e]? then return
@@ -90,7 +104,7 @@ def whnfHook (e : Expr) : TypeChecker.M Unit := do
   let ctx := {fileName := "mFile", fileMap := Inhabited.default}
   let state := {env}
   let mctxt := {lctx}
-  let _ ← (checkWhnf e).run' mctxt |>.toIO ctx state
+  let _ ← (checkWhnf sref mod decl e).run' mctxt |>.toIO ctx state
 
 unsafe def methodsImpl : TypeChecker.Methods where
   isDefEqCore := fun t s => TypeChecker.Inner.isDefEqCore' t s methodsImpl
@@ -101,39 +115,40 @@ unsafe def methodsImpl : TypeChecker.Methods where
 @[implemented_by methodsImpl]
 opaque methods : TypeChecker.Methods := TypeChecker.Methods.withFuel 0
 
-unsafe def wrappedMethodsImpl : TypeChecker.Methods where
-  isDefEqCore := fun t s => TypeChecker.Inner.isDefEqCore' t s wrappedMethodsImpl
-  whnfCore := fun e r p => TypeChecker.Inner.whnfCore' e r p wrappedMethodsImpl
-  whnf := fun e => do whnfHook e; TypeChecker.Inner.whnf' e methods
-  inferType := fun e i => TypeChecker.Inner.inferType' e i wrappedMethodsImpl
+unsafe def wrappedMethodsImpl (sref : IO.Ref Stats) (mod decl : String) : TypeChecker.Methods where
+  isDefEqCore := fun t s => TypeChecker.Inner.isDefEqCore' t s (wrappedMethodsImpl sref mod decl)
+  whnfCore := fun e r p => TypeChecker.Inner.whnfCore' e r p (wrappedMethodsImpl sref mod decl)
+  whnf := fun e => do whnfHook sref mod decl e; TypeChecker.Inner.whnf' e methods
+  inferType := fun e i => TypeChecker.Inner.inferType' e i (wrappedMethodsImpl sref mod decl)
 
 @[implemented_by wrappedMethodsImpl]
-opaque wrappedMethods : TypeChecker.Methods := TypeChecker.Methods.withFuel 0
+opaque wrappedMethods (sref : IO.Ref Stats) (mod decl : String) : TypeChecker.Methods := TypeChecker.Methods.withFuel 0
 
 
-def checkWithLean4Lean (e : Expr) (lps : List Name) : MetaM Unit := do
+def checkWithLean4Lean (sref : IO.Ref Stats) (mod declName : String) (e : Expr) (lps : List Name) : MetaM Unit := do
   let r ← TypeChecker.M.run (← getEnv) .safe {} do
     withReader ({ · with lparams := lps }) do
-      ReaderT.run (r := wrappedMethods) do
+      ReaderT.run (r := wrappedMethods sref mod declName) do
           TypeChecker.Inner.inferType e (inferOnly := false)
   match r with
   | .ok _t => pure () -- IO.println s!"{t}"
   | .error e => throwError "Lean4Lean complains: {e.toMessageData (← getOptions)}"
 
 
-def checkConstInfo (ci : ConstantInfo) : MetaM Unit := do
+def checkConstInfo (sref : IO.Ref Stats) (mod : String) (ci : ConstantInfo) : MetaM Unit := do
+  let nameStr := ci.name.toString.map id -- Do not reference objects in the olean
   match ci with
   | .defnInfo ci =>
     if ci.safety matches .safe then
       -- checkBody ci.value
-      checkWithLean4Lean ci.value ci.levelParams
+      checkWithLean4Lean sref mod nameStr ci.value ci.levelParams
   | .thmInfo ci =>
       -- checkBody ci.value
-      checkWithLean4Lean ci.value ci.levelParams
+      checkWithLean4Lean sref mod nameStr ci.value ci.levelParams
   | _ => return
 
-def checkConstInfos (consts : Array ConstantInfo) : MetaM Unit := do
-  consts.forM checkConstInfo
+def checkConstInfos (sref : IO.Ref Stats) (mod : String) (consts : Array ConstantInfo) : MetaM Unit := do
+  consts.forM (checkConstInfo sref mod)
 
 unsafe def withMod (module : Name) (k : Array ConstantInfo → MetaM Unit): IO Unit := do
   let mFile ← findOLean module
@@ -154,6 +169,7 @@ unsafe def main (args : List String) : IO UInt32 := do
   let (flags, args) := args.partition fun s => s.startsWith "--"
   if let .some bad := flags.find? fun f => !#["--module-list"].contains f then
     throw <| IO.userError s!"Invalid flag {bad}"
+  let stats : IO.Ref Stats ← IO.mkRef #[]
   args.forM fun arg => do
     let mod ← if arg.endsWith ".olean" then
       let some mod ← searchModuleNameOfFileName arg sp
@@ -168,11 +184,14 @@ unsafe def main (args : List String) : IO UInt32 := do
         let interesting := cis.any fun ci =>
           match ci with
           | .defnInfo {value := e, ..}
-          | .thmInfo {value := e,..} =>
-            hasInterestingFunction e
+          | .thmInfo {value := e, ..} =>
+            hasByDecideProof e
           | _ => false
         if interesting then IO.println mod
       else
         IO.println s!"Processing {mod}"
-        checkConstInfos cis
+        checkConstInfos stats mod.toString cis
+  let filename := "stats.json"
+  IO.println s!"Writing {(←stats.get).size} statistics to {filename}."
+  IO.FS.writeFile filename (toJson (← stats.get)).pretty
   return 0
