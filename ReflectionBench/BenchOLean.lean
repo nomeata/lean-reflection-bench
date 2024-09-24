@@ -11,6 +11,7 @@ structure Stat where
   inputSize : Nat
   kernelTime : Nat
   lazyWhnfTime : Option Nat
+  lazyWhnfUnfoldTime : Option Nat
   -- outputSize : Option Nat
 deriving ToJson, Repr
 
@@ -31,7 +32,8 @@ def lean4LeanCheck (e : Expr) : MetaM Unit := do
       TypeChecker.check e .none
   let _ ← Lean.ofExceptKernelException r
 
-def runWhnf (desc : String) (whnf : Environment → LocalContext → Expr → MetaM Expr) (e : Expr) : MetaM (Option Nat) := do
+def runWhnf (desc : String) (whnf : Environment → LocalContext → Expr → MetaM Expr) (e : Expr)
+    (checkResult := true): MetaM (Option Nat) := do
   try
     let env ← getEnv
     let lctx ← getLCtx
@@ -39,17 +41,18 @@ def runWhnf (desc : String) (whnf : Environment → LocalContext → Expr → Me
     let startT ← IO.monoNanosNow
     let r ← whnf env lctx e
     let endT ← IO.monoNanosNow
-    try withCurrHeartbeats <| withOptions (smartUnfolding.set ·  false) <| Meta.check r
-    catch ex =>
-      -- withOptions (pp.universes.set · true) do
-      -- withOptions (pp.explicit.set · true) do
-        IO.println f!"{desc} reduced\n{← ppExpr e}\nto type-incorrect\n{← ppExpr r}\n{← ex.toMessageData.format}"
+    if checkResult then
+      try withCurrHeartbeats <| withOptions (smartUnfolding.set ·  false) <| Meta.check r
+      catch ex =>
+        -- withOptions (pp.universes.set · true) do
+        -- withOptions (pp.explicit.set · true) do
+          IO.println f!"{desc} reduced\n{← ppExpr e}\nto type-incorrect\n{← ppExpr r}\n{← ex.toMessageData.format}"
 
-    let r' ← kernelWhnf (← Lean.getEnv) (← Lean.getLCtx) e
-    unless (← withOptions (smartUnfolding.set ·  false) <| withTransparency .all <| isDefEqGuarded r r') do
-      -- withOptions (pp.universes.set · true) do
-      withOptions (pp.deepTerms.set · true) do
-        IO.println f!"{desc} reduced\n{← ppExpr e}\nto\n{← ppExpr r}\nnot defeq to \n{← ppExpr r'}"
+      let r' ← kernelWhnf (← Lean.getEnv) (← Lean.getLCtx) e
+      unless (← withOptions (smartUnfolding.set ·  false) <| withTransparency .all <| isDefEqGuarded r r') do
+        -- withOptions (pp.universes.set · true) do
+        withOptions (pp.deepTerms.set · true) do
+          IO.println f!"{desc} reduced\n{← ppExpr e}\nto\n{← ppExpr r}\nnot defeq to \n{← ppExpr r'}"
 
     let diffT := endT - startT
     return .some diffT
@@ -68,7 +71,8 @@ def checkWhnf (stats : IO.Ref Stats) (module decl : String) (e : Expr) : MetaM U
     let .some kernelTime ← runWhnf "Kernel.whnf" kernelWhnf e
       | IO.println f!"Kernel.whnf failed?"
     let lazyWhnfTime ← runWhnf "lazyWhnf" lazyWhnf e
-    let stat : Stat := { module, decl, inputSize, kernelTime, lazyWhnfTime }
+    let lazyWhnfUnfoldTime ← runWhnf (checkResult := false) "lazyWhnfUnfold" (lazyWhnf (useUnfold := true)) e
+    let stat : Stat := { module, decl, inputSize, kernelTime, lazyWhnfTime, lazyWhnfUnfoldTime }
     stats.modify (·.push stat)
     if kernelTime > 5000000 ∨ lazyWhnfTime.any (· > 5000000) then
       IO.println f!"Looking at {← ppExpr e}:"
@@ -201,6 +205,10 @@ unsafe def main (args : List String) : IO UInt32 := do
 
   let totalKernel : Nat := good.foldl (·+ ·.kernelTime) 0 / 1000000
   let totalLazyWhnf : Nat := good.foldl (·+ ·.lazyWhnfTime.get!) 0 / 1000000
-  let frac : Float := .ofNat totalLazyWhnf / .ofNat totalKernel * 100
-  IO.println s!"Total kernel: {totalKernel}ms, Total lazyWhnf: {totalLazyWhnf}ms ({frac}%)"
+  let fracLazy : Float := .ofNat totalLazyWhnf / .ofNat totalKernel * 100
+
+  let good2 := s.filter (·.lazyWhnfTime.isSome)
+  let totalLazyWhnfUnfold : Nat := good2.foldl (·+ ·.lazyWhnfUnfoldTime.get!) 0 / 1000000
+  let fracLazyUnfold : Float := .ofNat totalLazyWhnfUnfold / .ofNat totalKernel * 100
+  IO.println s!"Total kernel: {totalKernel}ms, Total lazyWhnf: {totalLazyWhnf}ms ({fracLazy}%), Total lazyWhnfUnfold: {totalLazyWhnfUnfold}ms ({fracLazyUnfold}%)"
   return 0

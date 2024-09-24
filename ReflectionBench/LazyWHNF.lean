@@ -264,7 +264,8 @@ def GoArg2 (t : GoTag) := match t with
   | .ptr => Unit
 
 
-partial def lazyWhnf (genv : Environment) (_lctx : LocalContext) (e : Expr) : MetaM Expr := do
+partial def lazyWhnf (genv : Environment) (_lctx : LocalContext) (e : Expr)
+  (useUnfold := false) : MetaM Expr := do
   go #[] .exp e #[] [] #[]
 where
   go (heap : Heap) (t : GoTag) (x1 : GoArg1 t) (x2 : GoArg2 t) (env : Env) (stack : Stack) : MetaM Expr := do
@@ -322,6 +323,9 @@ where
               goVal heap (.con ci.name us lmap ps fs) env stack
             | .quotInfo {kind := .ctor, ..} =>
               assert! arity = 3
+              goVal heap (.con ci.name us lmap args #[p]) env stack
+            | .quotInfo {kind := .type, ..} =>
+              assert! arity = 2
               goVal heap (.con ci.name us lmap args #[p]) env stack
             | .recInfo {name := ``Eq.rec,..} =>
               if false then
@@ -464,15 +468,14 @@ where
             -- IO.eprint s!"Unfolding {n} (primitive)\n"
             goVal heap (.primNat n none) [] stack
           else
-          /-
-          match genv.find? (n ++ `eq_unfold) with
-          | some ufci =>
-            let .some (_, .const _ _, val) := ufci.type.eq?
-              | throwError "Unexpected unfolding lemma : {ufci.name} : {ufci.type}\n"
-            let lmap := lmap.push (ci.levelParams, us)
-            goExp heap val lmap [] stack
-          | _ =>
-          -/
+          -- This simulated rewriting with unfolding lemmas, without actually
+          -- materializing them
+          match useUnfold, Lean.Elab.Structural.eqnInfoExt.find? genv n with
+          | true, some eqnInfo =>
+            -- IO.eprint s!"Unfolding {ci.name} using eqnInfo\n"
+            let lmap := lmap.push (eqnInfo.levelParams, us)
+            goExp heap eqnInfo.value lmap [] stack
+          | _, _=>
           match ci with
           | .defnInfo ci | .thmInfo ci =>
             -- IO.eprint s!"Unfolding {ci.name}\n"
@@ -490,10 +493,10 @@ where
       | .mdata _ e => goExp heap e lmap env stack
       | _ => throwError "Unimplemented: {toString e}"
 
-elab "#lazy_reduce" t:term : command => Lean.Elab.Command.runTermElabM fun _ => do
+elab "#lazy_reduce" uf:"unfold"? t:term : command => Lean.Elab.Command.runTermElabM fun _ => do
   let e ← Lean.Elab.Term.elabTermAndSynthesize t none
   Meta.lambdaTelescope e fun _ e => do
-    let e'' ← lazyWhnf (← Lean.getEnv) (← Lean.getLCtx) e
+    let e'' ← lazyWhnf (← Lean.getEnv) (← Lean.getLCtx) e (useUnfold := uf.isSome)
     -- Meta.check e''
     -- guard (← Meta.isDefEq e e'')
     Lean.logInfo m!"{e''}"
