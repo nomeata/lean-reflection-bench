@@ -155,6 +155,24 @@ def checkConstInfo (sref : IO.Ref Stats) (mod : String) (ci : ConstantInfo) : Me
 def checkConstInfos (sref : IO.Ref Stats) (mod : String) (consts : Array ConstantInfo) : MetaM Unit := do
   consts.forM (checkConstInfo sref mod)
 
+def findEqRecs (mod : String) (consts : Array ConstantInfo) : MetaM Unit := do
+  consts.forM fun ci => do
+    if isNoConfusion (← getEnv) ci.name then return
+    if ← isMatcher ci.name then return
+    if Match.isMatchEqnTheorem (← getEnv) ci.name then return
+    let some value := ci.value? | return
+    let some e := value.find? fun e =>
+      if e.isConstOf ``Eq.rec || e.isConstOf ``Eq.ndrec then
+        let u := e.constLevels![0]!
+        !u.isZero
+      else
+        false
+      | return
+    let u := e.constLevels![0]!
+    let t := if ci matches .defnInfo .. then "def" else "theorem"
+    IO.println s!"({mod}) {t} {ci.name} eliminates Eq into universe {u}"
+    (← IO.getStdout).flush
+
 unsafe def withMod (module : Name) (k : Array ConstantInfo → MetaM Unit): IO Unit := do
   let mFile ← findOLean module
   unless (← mFile.pathExists) do
@@ -168,11 +186,13 @@ unsafe def withMod (module : Name) (k : Array ConstantInfo → MetaM Unit): IO U
   env.freeRegions
   region.free
 
+def flags := #["--module-list", "--eqrecs"]
+
 unsafe def main (args : List String) : IO UInt32 := do
   initSearchPath (← findSysroot)
   let sp ← searchPathRef.get
   let (flags, args) := args.partition fun s => s.startsWith "--"
-  if let .some bad := flags.find? fun f => !#["--module-list"].contains f then
+  if let .some bad := flags.find? fun f => !flags.contains f then
     throw <| IO.userError s!"Invalid flag {bad}"
   let stats : IO.Ref Stats ← IO.mkRef #[]
   args.forM fun arg => do
@@ -185,6 +205,9 @@ unsafe def main (args : List String) : IO UInt32 := do
       | .anonymous => throw <| IO.userError s!"Not a module name: {arg}"
       | m => pure m
     withMod mod fun cis => do
+      if flags.contains "--eqrecs" then
+        findEqRecs mod.toString cis
+      else
       if flags.contains "--module-list" then
         let interesting := cis.any fun ci =>
           match ci with
@@ -196,19 +219,20 @@ unsafe def main (args : List String) : IO UInt32 := do
       else
         IO.println s!"Processing {mod}"
         checkConstInfos stats mod.toString cis
-  let filename := "stats.json"
-  let s ← stats.get
-  IO.println s!"Writing {s.size} statistics to {filename}."
-  IO.FS.writeFile filename (toJson s).pretty
-  let (bad, good) := s.partition (·.lazyWhnfTime.isNone)
-  IO.println s!"Of these, {bad.size} failed to compute."
+  unless flags.contains "--eqrecs" do
+    let filename := "stats.json"
+    let s ← stats.get
+    IO.println s!"Writing {s.size} statistics to {filename}."
+    IO.FS.writeFile filename (toJson s).pretty
+    let (bad, good) := s.partition (·.lazyWhnfTime.isNone)
+    IO.println s!"Of these, {bad.size} failed to compute."
 
-  let totalKernel : Nat := good.foldl (·+ ·.kernelTime) 0 / 1000000
-  let totalLazyWhnf : Nat := good.foldl (·+ ·.lazyWhnfTime.get!) 0 / 1000000
-  let fracLazy : Float := .ofNat totalLazyWhnf / .ofNat totalKernel * 100
+    let totalKernel : Nat := good.foldl (·+ ·.kernelTime) 0 / 1000000
+    let totalLazyWhnf : Nat := good.foldl (·+ ·.lazyWhnfTime.get!) 0 / 1000000
+    let fracLazy : Float := .ofNat totalLazyWhnf / .ofNat totalKernel * 100
 
-  let good2 := s.filter (·.lazyWhnfTime.isSome)
-  let totalLazyWhnfUnfold : Nat := good2.foldl (·+ ·.lazyWhnfUnfoldTime.get!) 0 / 1000000
-  let fracLazyUnfold : Float := .ofNat totalLazyWhnfUnfold / .ofNat totalKernel * 100
-  IO.println s!"Total kernel: {totalKernel}ms, Total lazyWhnf: {totalLazyWhnf}ms ({fracLazy}%), Total lazyWhnfUnfold: {totalLazyWhnfUnfold}ms ({fracLazyUnfold}%)"
+    let good2 := s.filter (·.lazyWhnfTime.isSome)
+    let totalLazyWhnfUnfold : Nat := good2.foldl (·+ ·.lazyWhnfUnfoldTime.get!) 0 / 1000000
+    let fracLazyUnfold : Float := .ofNat totalLazyWhnfUnfold / .ofNat totalKernel * 100
+    IO.println s!"Total kernel: {totalKernel}ms, Total lazyWhnf: {totalLazyWhnf}ms ({fracLazy}%), Total lazyWhnfUnfold: {totalLazyWhnfUnfold}ms ({fracLazyUnfold}%)"
   return 0
