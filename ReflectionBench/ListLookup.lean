@@ -80,10 +80,9 @@ def test3 : ∀ n < 2^exp, list.get? n = Option.some n := by
 
 def test : Bool := decide (∀ n < 2^exp, list.get? n = Option.some n)
 
-#time #lazy_reduce   test
-
-def foo := @List.get?.eq_unfold
-
--- #time #kernel_reduce test
-#time #lazy_reduce   test
---#time #nbe_reduce    test
+#time #kernel_reduce   test
+#time #kernel_reduce   test
+#time #lazy_reduce test
+#time #lazy_reduce test
+#time #lazy_reduce unfold test
+#time #lazy_reduce unfold test

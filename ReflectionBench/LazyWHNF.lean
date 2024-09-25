@@ -18,11 +18,17 @@ Rough notes
 
 open Lean
 
+namespace LazyWhnf
+
+structure Diagnostics where
+  ruleKSuccesses : Nat := 0
+  ruleKFailures : Nat := 0
+
 abbrev Env := List Nat
 
 abbrev LMap := Array (List Name × List Level)
 
-def Lean.Expr.instLMap (e : Expr) (lmap : LMap) :=
+def _root_.Lean.Expr.instLMap (e : Expr) (lmap : LMap) :=
   -- TODO: Cheaper to keep just one mapping and apply to its domain eagerly?
   lmap.foldr (fun (us, ls) e => e.instantiateLevelParams us ls) e
 
@@ -79,14 +85,13 @@ instance : ToString HeapElem where toString
 
 abbrev Heap := Array (HeapElem × Env)
 
-def Lean.ConstructorVal.arity (ci : ConstructorVal) : Nat :=
+def _root_.Lean.ConstructorVal.arity (ci : ConstructorVal) : Nat :=
   ci.numParams + ci.numFields
 
-def Lean.InductiveVal.arity (ii : InductiveVal) : Nat :=
+def _root_.Lean.InductiveVal.arity (ii : InductiveVal) : Nat :=
   ii.numParams + ii.numIndices
 
--- Arity with the major premise
-def Lean.RecursorVal.arity (ci : RecursorVal) : Nat :=
+def _root_.Lean.RecursorVal.arity (ci : RecursorVal) : Nat :=
   ci.numParams + ci.numMotives + ci.numMinors + ci.numIndices + 1
 
 partial def toVal (genv : Environment) (lmap : LMap) (e : Expr) : MetaM (Option Val) := match e with
@@ -169,6 +174,8 @@ def readBackStackElem (se : StackElem) (e : Expr) : ReadBackM Expr := match se w
   | .rec_ ci us lmap args =>
     return mkAppN (Expr.const ci.name us |>.instLMap lmap) ((← args.mapM readBackPtr) ++ #[e])
   | .proj n i => return e.proj n i
+  | .nfNat 0 => return e
+  | .nfNat 1 => return mkApp (.const ``Nat.succ []) e
   | .nfNat n => return mkNatAdd e (mkNatLit n)
   | .primNat n none => return mkApp (.const n []) e
   | .primNat n (some m) => return mkApp2 (.const n []) (.lit (.natVal m)) e -- ofNat?
@@ -265,13 +272,17 @@ def GoArg2 (t : GoTag) := match t with
 
 
 partial def lazyWhnf (genv : Environment) (_lctx : LocalContext) (e : Expr)
-  (useUnfold := false) : MetaM Expr := do
-  go #[] .exp e #[] [] #[]
+  (useUnfold := false) : MetaM (Diagnostics × Expr) := do
+  go {} #[] .exp e #[] [] #[]
 where
-  go (heap : Heap) (t : GoTag) (x1 : GoArg1 t) (x2 : GoArg2 t) (env : Env) (stack : Stack) : MetaM Expr := do
-  let goVal heap v env stack := go heap .value v () env stack
-  let goExp heap e lmap env stack := go heap .exp e lmap env stack
-  let goPtr heap v stack := go heap .ptr v () [] stack --NB env does not matter
+  go (diag : Diagnostics) (heap : Heap) (t : GoTag) (x1 : GoArg1 t) (x2 : GoArg2 t) (env : Env)
+    (stack : Stack) : MetaM (Diagnostics × Expr) := do
+  let goVal diag heap v env stack := go diag heap .value v () env stack
+  let goExp diag heap e lmap env stack := go diag heap .exp e lmap env stack
+  let goPtr diag heap v stack := go diag heap .ptr v () [] stack --NB env does not matter
+  let finish diag heap v env stack := do
+      let e ← ofConf heap v env stack
+      return (diag, e)
   match t with
   | .ptr =>
     let p : Nat := x1
@@ -281,16 +292,16 @@ where
       -- Cannot blackhole if we want to be able abort anytime (neutral values)
       -- let heap' := heap.set! p default
       let stack' := stack.push (.upd p)
-      goExp heap e lm env' stack'
+      goExp diag heap e lm env' stack'
     | .value v =>
-      goVal heap v env' stack
+      goVal diag heap v env' stack
 
   | .value =>
     let v : Val := x1
     -- IO.eprint s!"⊢ {v} (stack empty? {stack.isEmpty})\n"
 
     if stack.isEmpty || v matches .neutral .. then
-      ofConf heap v env stack
+      finish diag heap v env stack
     else
       -- checkValConf heap v env stack
 
@@ -301,36 +312,37 @@ where
       match se with
       | .upd p =>
         let heap' := heap.set! p (.value v, env)
-        goVal heap' v env stack
+        goVal diag heap' v env stack
       | .app p =>
         match v with
         | .pap ci us lmap arity args =>
           assert! args.size + 1 ≤ arity
           if args.size + 1 < arity then
             let args' := args.push p
-            goVal heap (.pap ci us lmap arity args') env stack
+            goVal diag heap (.pap ci us lmap arity args') env stack
           else
             match ci with
             | .ctorInfo ci =>
               let args' := args.push p
               let ps := args'[:ci.numParams]
               let fs := args'[ci.numParams:]
-              goVal heap (.con ci.name us lmap ps fs) env stack
+              goVal diag heap (.con ci.name us lmap ps fs) env stack
             | .inductInfo ii =>
               let args' := args.push p
               let ps := args'[:ii.numParams]
               let fs := args'[ii.numParams:]
-              goVal heap (.con ci.name us lmap ps fs) env stack
+              goVal diag heap (.con ci.name us lmap ps fs) env stack
             | .quotInfo {kind := .ctor, ..} =>
               assert! arity = 3
-              goVal heap (.con ci.name us lmap args #[p]) env stack
+              goVal diag heap (.con ci.name us lmap args #[p]) env stack
             | .quotInfo {kind := .type, ..} =>
               assert! arity = 2
-              goVal heap (.con ci.name us lmap args #[p]) env stack
+              goVal diag heap (.con ci.name us lmap args #[p]) env stack
             | .recInfo {name := ``Eq.rec,..} =>
               if false then
                 -- This implemens the “fast rule K” without conversion checking
-                goPtr heap args[3]! stack
+                let diag' := { diag with ruleKSuccesses := diag.ruleKSuccesses + 1}
+                goPtr diag' heap args[3]! stack
               else
                 -- This implements rule K. We have to read back here!
                 let (t1, t2) ← ReadBackM.run heap do
@@ -340,23 +352,25 @@ where
                 -- IO.println f!"Rule K: {← Meta.ppExpr t1} =?= {← Meta.ppExpr t2}"
                 match Kernel.isDefEq genv _lctx t1 t2 with
                 | .ok true =>
-                  goPtr heap args[3]! stack
+                  let diag' := { diag with ruleKSuccesses := diag.ruleKSuccesses + 1}
+                  goPtr diag' heap args[3]! stack
                 | _ =>
+                  let diag' := { diag with ruleKFailures := diag.ruleKFailures + 1}
                   -- IO.println f!"Rule K failed:\n{← Meta.ppExpr t1}\n=?=¬{← Meta.ppExpr t2}"
-                  goPtr heap p (stack.push (.rec_ ci us lmap args))
+                  goPtr diag' heap p (stack.push (.rec_ ci us lmap args))
             | _ =>
               -- all other .paps are strict in their last argument, so evaluate that
-              goPtr heap p (stack.push (.rec_ ci us lmap args))
+              goPtr diag heap p (stack.push (.rec_ ci us lmap args))
         | .elam _ _ e' lmap _ =>
-          goExp heap e' lmap (p :: env) stack
+          goExp diag heap e' lmap (p :: env) stack
         | .primNat n a? =>
-          goPtr heap p (stack.push (.primNat n a?) |>.push (.nfNat 0))
+          goPtr diag heap p (stack.push (.primNat n a?) |>.push (.nfNat 0))
         | _ => throwError "Cannot apply value {v}"
       | .proj _ idx =>
         match v with
         | .con _cn _us _lmap _ps fs =>
           if let some p := fs[idx]? then
-            goPtr heap p stack
+            goPtr diag heap p stack
           else
             throwError "Projection out of range"
         | _ => throwError "Cannot project value {v}"
@@ -371,14 +385,14 @@ where
                 let rhs := ri.rules[0]!.rhs
                 let lmap := lmap.push (ri.levelParams, us)
                 -- let rhs := rhs.instantiateLevelParams ri.levelParams us
-                goExp heap rhs lmap [] (stack ++ args.reverse.map (.app ·))
+                goExp diag heap rhs lmap [] (stack ++ args.reverse.map (.app ·))
               else
                 let p := heap.size
                 let heap' := heap.push (.value (.lit (.natVal (n-1))), [])
                 let lmap := lmap.push (ri.levelParams, us)
                 let rhs := ri.rules[1]!.rhs
                 -- let rhs := rhs.instantiateLevelParams ri.levelParams us
-                goExp heap' rhs lmap [] (stack ++ #[.app p] ++ args.reverse.map (.app ·))
+                goExp diag heap' rhs lmap [] (stack ++ #[.app p] ++ args.reverse.map (.app ·))
             else
               throwError "Cannot recurse on literal"
           | .con cn _ _ _ps fs =>
@@ -392,7 +406,7 @@ where
               let lmap := lmap.push (ri.levelParams, us)
               -- let rhs := rule.rhs.instantiateLevelParams ri.levelParams us
               -- IO.eprint s!"Applying {ri.name} with args {rargs}\n"
-              goExp heap rhs lmap [] (stack ++ rargs.reverse.map (.app ·))
+              goExp diag heap rhs lmap [] (stack ++ rargs.reverse.map (.app ·))
           | _ => throwError "Cannot recurse with {ri.name} on value {v}"
         | .quotInfo qi =>
           unless qi.kind matches .ind || qi.kind matches .lift do
@@ -402,7 +416,7 @@ where
           | .con cn _ _ _ps fs =>
             assert! cn = ``Quot.mk
             assert! fs.size = 1
-            goPtr heap args[3]! (stack.push (.app fs.back))
+            goPtr diag heap args[3]! (stack.push (.app fs.back))
           | _ => throwError "Cannot recurse with {qi.name} on value {v}"
         | _ => throwError "Unexpected {ci.name} in rec_"
       | .nfNat n =>
@@ -410,24 +424,25 @@ where
         | .con cn _us _ _ps fs =>
           if cn = ``Nat.succ then
             assert! fs.size = 1
-            goPtr heap fs[0]! (stack.push (.nfNat (n+1)))
+            goPtr diag heap fs[0]! (stack.push (.nfNat (n+1)))
           else if cn = ``Nat.zero then
-            goVal heap (.lit (.natVal n)) env stack
+            goVal diag heap (.lit (.natVal n)) env stack
           else
-            throwError "Unexpcted constructor in nfNat: {v}"
+            throwError "Unexpected constructor in nfNat: {v}"
         | .lit (.natVal m) =>
-            goVal heap (.lit (.natVal (m + n))) env stack
+            goVal diag heap (.lit (.natVal (m + n))) env stack
         | _ =>
             throwError "Unexpcted value in nfNat: {v}"
       | .primNat f none =>
         match v with
         | .lit (.natVal m) =>
-            goVal heap (.primNat f m) env stack
-        | _ => throwError "Unexpected value in primNat"
+            goVal diag heap (.primNat f m) env stack
+        | _ =>
+          throwError "Unexpected value in primNat"
       | .primNat f (some m) =>
         match v with
         | .lit (.natVal n) =>
-            goVal heap (evalPrimNat f m n) env stack
+            goVal diag heap (evalPrimNat f m n) env stack
         | _ => throwError "Unexpected value in primNat"
 
   | .exp =>
@@ -436,37 +451,37 @@ where
     -- IO.eprint s!"⊢ {e}\n"
     -- checkExprConf heap e lmap env stack
     if let some v ← toVal genv lmap e then
-      goVal heap v env stack
+      goVal diag heap v env stack
     else
       match e with
       | .bvar i =>
         if let some p := env[i]? then
-          goPtr heap p stack
+          goPtr diag heap p stack
         else
           throwError "Bound variable {i} out of scope"
       | .letE _n _t v b _ =>
         let p := heap.size
         let heap' := heap.push (.thunk v lmap, env)
         let env' := p :: env
-        goExp heap' b lmap env' stack
+        goExp diag heap' b lmap env' stack
       | .app f a =>
         if let .bvar i := a then
           if let some p := env[i]? then
-            goExp heap f lmap env (stack.push (.app p))
+            goExp diag heap f lmap env (stack.push (.app p))
           else
             throwError "Bound variable {i} out of scope"
         else
           let p := heap.size
           let heap' := heap.push (.thunk a lmap, env)
-          goExp heap' f lmap env (stack.push (.app p))
+          goExp diag heap' f lmap env (stack.push (.app p))
       | .proj n i b =>
         let stack' := stack.push (.proj n i)
-        goExp heap b lmap env stack'
+        goExp diag heap b lmap env stack'
       | .const n us => do
           let some ci := genv.find? n | throwError "Did not find {n}"
           if primNatFuns.contains n then
             -- IO.eprint s!"Unfolding {n} (primitive)\n"
-            goVal heap (.primNat n none) [] stack
+            goVal diag heap (.primNat n none) [] stack
           else
           -- This simulated rewriting with unfolding lemmas, without actually
           -- materializing them
@@ -474,29 +489,33 @@ where
           | true, some eqnInfo =>
             -- IO.eprint s!"Unfolding {ci.name} using eqnInfo\n"
             let lmap := lmap.push (eqnInfo.levelParams, us)
-            goExp heap eqnInfo.value lmap [] stack
+            goExp diag heap eqnInfo.value lmap [] stack
           | _, _=>
           match ci with
           | .defnInfo ci | .thmInfo ci =>
             -- IO.eprint s!"Unfolding {ci.name}\n"
             let val := ci.value
             let lmap := lmap.push (ci.levelParams, us)
-            goExp heap val lmap [] stack
+            goExp diag heap val lmap [] stack
           | _ => throwError "Unimplemented constant: {e}"
       | .fvar n => do
         match (← n.getDecl) with
         | .ldecl _ _ _ _ value _ _ =>
-          goExp heap value lmap [] stack
+          goExp diag heap value lmap [] stack
         | _ =>
-          goVal heap (.neutral e lmap) env stack
+          goVal diag heap (.neutral e lmap) env stack
       | .lam .. => unreachable!
-      | .mdata _ e => goExp heap e lmap env stack
+      | .mdata _ e => goExp diag heap e lmap env stack
       | _ => throwError "Unimplemented: {toString e}"
+
+end LazyWhnf
+
+export LazyWhnf (lazyWhnf)
 
 elab "#lazy_reduce" uf:"unfold"? t:term : command => Lean.Elab.Command.runTermElabM fun _ => do
   let e ← Lean.Elab.Term.elabTermAndSynthesize t none
   Meta.lambdaTelescope e fun _ e => do
-    let e'' ← lazyWhnf (← Lean.getEnv) (← Lean.getLCtx) e (useUnfold := uf.isSome)
+    let (_diag, e'') ← lazyWhnf (← Lean.getEnv) (← Lean.getLCtx) e (useUnfold := uf.isSome)
     -- Meta.check e''
     -- guard (← Meta.isDefEq e e'')
     Lean.logInfo m!"{e''}"
@@ -567,7 +586,7 @@ set_option pp.funBinderTypes true
 #lazy_reduce Nat.add (Nat.succ 42)
 
 opaque aNat : Nat
-/-- info: Nat.add 43 (aNat + 1) -/
+/-- info: Nat.add 43 aNat.succ -/
 #guard_msgs in
 #lazy_reduce Nat.add (Nat.succ 42) (Nat.succ aNat)
 
@@ -586,5 +605,15 @@ set_option pp.universes true in
 /-- info: List.{(max uu u) + 1} -/
 #guard_msgs in
 #lazy_reduce foo2.{uu,u}
+
+
+-- Tests nat operations on open terms
+/--
+info: Bool.rec (motive := fun (x : Bool) => (0 + k + 1).beq 0 = x → (fun (x : Bool) => Decidable (0 + k + 1 = 0)) x)
+  (fun (h : (0 + k + 1).beq 0 = false) => isFalse ⋯) (fun (h : (0 + k + 1).beq 0 = true) => isTrue ⋯)
+  (((Nat.add 0 k).add 1).beq 0) ⋯
+-/
+#guard_msgs in
+#lazy_reduce fun k => instDecidableEqNat (0 + k + 1) 0
 
 end Levels
