@@ -11,7 +11,7 @@ structure WhnfStat where
   outputSize : Nat
   ruleKSuccesses : Nat := 0
   ruleKFailures : Nat := 0
-deriving ToJson, Repr
+deriving ToJson, FromJson, Repr, Inhabited
 
 def WhnfStat.hasRuleK (s : WhnfStat) : Bool := s.ruleKFailures + s.ruleKFailures > 0
 
@@ -22,15 +22,16 @@ structure Stat where
   kernel : WhnfStat
   lazyWhnf : WhnfStat
   lazyWhnfUnfold : WhnfStat
-deriving ToJson, Repr
+deriving ToJson, FromJson, Repr, Inhabited
 
-abbrev Stats := Array Stat
 
-partial def isReflProof (e : Expr) : Bool :=
+abbrev StatsWriter := Stat → IO Unit
+
+partial def ipushStatlProof (e : Expr) : Bool :=
   match_expr e with
   | Eq.refl _ _ => true
   | rfl _ _ => true
-  | id _ e => isReflProof e
+  | id _ e => ipushStatlProof e
   | _ => false
 
 def kernelWhnf (env : Environment) (lctx : LocalContext) (e : Expr) : MetaM Expr := do
@@ -112,7 +113,7 @@ def runWhnf (desc : String)
         outputSize := 0
     }
 
-def checkWhnf (stats : IO.Ref Stats) (module decl : String) (e : Expr) : MetaM Unit := do
+def checkWhnf (pushStat : StatsWriter) (module decl : String) (e : Expr) : MetaM Unit := do
     -- IO.println f!"Looking at {← ppExpr e}"
     let inputSize ← e.numObjs
 
@@ -128,15 +129,15 @@ def checkWhnf (stats : IO.Ref Stats) (module decl : String) (e : Expr) : MetaM U
                                isValue := isVal }
     let stat : Stat := { module, decl, inputSize, kernel,
                          lazyWhnf := lazyWhnfStats, lazyWhnfUnfold := lazyWhnfUnfoldStats }
-    stats.modify (·.push stat)
+    pushStat stat
     if kernelTime > 5000000 ∨ lazyWhnfStats.time > 5000000 then
       IO.println f!"Looking at {← ppExpr e}:"
       IO.println f!"{toJson stat}"
 
-def checkDecide (stats : IO.Ref Stats) (mod declName : String) (p inst eq : Expr) : MetaM Unit := do
-  if isReflProof eq then
+def checkDecide (pushStat : StatsWriter) (mod declName : String) (p inst eq : Expr) : MetaM Unit := do
+  if ipushStatlProof eq then
     let e' := mkApp2 (.const ``Decidable.decide []) p inst
-    checkWhnf stats mod declName e'
+    checkWhnf pushStat mod declName e'
   else
       IO.println f!"ignoring proof {← ppExpr eq}"
 
@@ -145,17 +146,17 @@ def hasByDecideProof (e : Expr) : Bool :=
        e.isAppOfArity ``of_decide_eq_true 3
     || e.isAppOfArity ``eq_true_of_decide 3
 
-def checkBody (stats : IO.Ref Stats) (mod declName : String) (e : Expr) : MetaM Unit := do
+def checkBody (pushStat : StatsWriter) (mod declName : String) (e : Expr) : MetaM Unit := do
   if hasByDecideProof e then
     let _ ← transform e (skipConstInApp := true) fun e => do
       match_expr e with
-      | of_decide_eq_true p inst eq => checkDecide stats mod declName p inst eq
-      | eq_true_of_decide p inst eq => checkDecide stats mod declName p inst eq
+      | of_decide_eq_true p inst eq => checkDecide pushStat mod declName p inst eq
+      | eq_true_of_decide p inst eq => checkDecide pushStat mod declName p inst eq
       | _ => pure ()
       return .continue
   return
 
-def whnfHook (sref : IO.Ref Stats) (mod decl : String) (e : Expr) : TypeChecker.M Unit := do
+def whnfHook (pushStat : StatsWriter) (mod decl : String) (e : Expr) : TypeChecker.M Unit := do
   unless e.isSort || e.isLambda || e.isLit || e.isForall do
   -- don't run if already cached
   if let some _ := (← get).whnfCache[e]? then return
@@ -164,7 +165,7 @@ def whnfHook (sref : IO.Ref Stats) (mod decl : String) (e : Expr) : TypeChecker.
   let ctx := {fileName := "mFile", fileMap := Inhabited.default}
   let state := {env}
   let mctxt := {lctx}
-  let _ ← (checkWhnf sref mod decl e).run' mctxt |>.toIO ctx state
+  let _ ← (checkWhnf pushStat mod decl e).run' mctxt |>.toIO ctx state
 
 unsafe def methodsImpl : TypeChecker.Methods where
   isDefEqCore := fun t s => TypeChecker.Inner.isDefEqCore' t s methodsImpl
@@ -175,40 +176,40 @@ unsafe def methodsImpl : TypeChecker.Methods where
 @[implemented_by methodsImpl]
 opaque methods : TypeChecker.Methods := TypeChecker.Methods.withFuel 0
 
-unsafe def wrappedMethodsImpl (sref : IO.Ref Stats) (mod decl : String) : TypeChecker.Methods where
-  isDefEqCore := fun t s => TypeChecker.Inner.isDefEqCore' t s (wrappedMethodsImpl sref mod decl)
-  whnfCore := fun e r p => TypeChecker.Inner.whnfCore' e r p (wrappedMethodsImpl sref mod decl)
-  whnf := fun e => do whnfHook sref mod decl e; TypeChecker.Inner.whnf' e methods
-  inferType := fun e i => TypeChecker.Inner.inferType' e i (wrappedMethodsImpl sref mod decl)
+unsafe def wrappedMethodsImpl (pushStat : StatsWriter) (mod decl : String) : TypeChecker.Methods where
+  isDefEqCore := fun t s => TypeChecker.Inner.isDefEqCore' t s (wrappedMethodsImpl pushStat mod decl)
+  whnfCore := fun e r p => TypeChecker.Inner.whnfCore' e r p (wrappedMethodsImpl pushStat mod decl)
+  whnf := fun e => do whnfHook pushStat mod decl e; TypeChecker.Inner.whnf' e methods
+  inferType := fun e i => TypeChecker.Inner.inferType' e i (wrappedMethodsImpl pushStat mod decl)
 
 @[implemented_by wrappedMethodsImpl]
-opaque wrappedMethods (sref : IO.Ref Stats) (mod decl : String) : TypeChecker.Methods := TypeChecker.Methods.withFuel 0
+opaque wrappedMethods (pushStat : StatsWriter) (mod decl : String) : TypeChecker.Methods := TypeChecker.Methods.withFuel 0
 
 
-def checkWithLean4Lean (sref : IO.Ref Stats) (mod declName : String) (e : Expr) (lps : List Name) : MetaM Unit := do
+def checkWithLean4Lean (pushStat : StatsWriter) (mod declName : String) (e : Expr) (lps : List Name) : MetaM Unit := do
   let r ← TypeChecker.M.run (← getEnv) .safe {} do
     withReader ({ · with lparams := lps }) do
-      ReaderT.run (r := wrappedMethods sref mod declName) do
+      ReaderT.run (r := wrappedMethods pushStat mod declName) do
           TypeChecker.Inner.inferType e (inferOnly := false)
   match r with
   | .ok _t => pure () -- IO.println s!"{t}"
   | .error e => throwError "Lean4Lean complains: {e.toMessageData (← getOptions)}"
 
 
-def checkConstInfo (sref : IO.Ref Stats) (mod : String) (ci : ConstantInfo) : MetaM Unit := do
+def checkConstInfo (pushStat : StatsWriter) (mod : String) (ci : ConstantInfo) : MetaM Unit := do
   let nameStr := ci.name.toString.map id -- Do not reference objects in the olean
   match ci with
   | .defnInfo ci =>
     if ci.safety matches .safe then
       -- checkBody ci.value
-      checkWithLean4Lean sref mod nameStr ci.value ci.levelParams
+      checkWithLean4Lean pushStat mod nameStr ci.value ci.levelParams
   | .thmInfo ci =>
       -- checkBody ci.value
-      checkWithLean4Lean sref mod nameStr ci.value ci.levelParams
+      checkWithLean4Lean pushStat mod nameStr ci.value ci.levelParams
   | _ => return
 
-def checkConstInfos (sref : IO.Ref Stats) (mod : String) (consts : Array ConstantInfo) : MetaM Unit := do
-  consts.forM (checkConstInfo sref mod)
+def checkConstInfos (pushStat : StatsWriter) (mod : String) (consts : Array ConstantInfo) : MetaM Unit := do
+  consts.forM (checkConstInfo pushStat mod)
 
 def findEqRecs (mod : String) (consts : Array ConstantInfo) : MetaM Unit := do
   consts.forM fun ci => do
@@ -241,15 +242,41 @@ unsafe def withMod (module : Name) (k : Array ConstantInfo → MetaM Unit): IO U
   env.freeRegions
   region.free
 
-def flags := #["--module-list", "--eqrecs"]
 
-unsafe def main (args : List String) : IO UInt32 := do
-  initSearchPath (← findSysroot)
+def summarizeStats (s : Array Stat) : IO Unit := do
+  let good := s.filter (·.lazyWhnf.time > 0)
+  IO.println s!"Found {s.size} stats, {s.size - good.size} of which failed to compute."
+
+  let totalKernel : Nat := good.foldl (·+ ·.kernel.time) 0 / 1000000
+  let totalLazyWhnf : Nat := good.foldl (·+ ·.lazyWhnf.time) 0 / 1000000
+  let fracLazy : Float := .ofNat totalLazyWhnf / .ofNat totalKernel * 100
+
+  let good2 := s.filter (·.lazyWhnfUnfold.time > 0)
+  let totalLazyWhnfUnfold : Nat := good2.foldl (·+ ·.lazyWhnfUnfold.time) 0 / 1000000
+  let fracLazyUnfold : Float := .ofNat totalLazyWhnfUnfold / .ofNat totalKernel * 100
+  IO.println s!"Total kernel: {totalKernel}ms, Total lazyWhnf: {totalLazyWhnf}ms ({fracLazy}%), Total lazyWhnfUnfold: {totalLazyWhnfUnfold}ms ({fracLazyUnfold}%)"
+
+  let ruleKFrac : Float := .ofNat (good.filter (·.lazyWhnf.hasRuleK)).size / .ofNat good.size * 100
+  IO.println s!"Rule K used in {ruleKFrac}% of reductions."
+
+  let good3 := s.filter fun s => s.lazyWhnf.time > 0 && s.kernel.isValue
+  let totalKernel : Nat := good3.foldl (·+ ·.kernel.time) 0 / 1000000
+  let totalLazyWhnf : Nat := good3.foldl (·+ ·.lazyWhnf.time) 0 / 1000000
+  let fracLazy : Float := .ofNat totalLazyWhnf / .ofNat totalKernel * 100
+  IO.println s!"Only successful reductions: Count: {good3.size}, Total kernel: {totalKernel}ms, Total lazyWhnf: {totalLazyWhnf}ms ({fracLazy}%)"
+  let ruleKFrac : Float := .ofNat (good3.filter (·.lazyWhnf.hasRuleK)).size / .ofNat good3.size * 100
+  IO.println s!"Rule K used in {ruleKFrac}% of reductions."
+
+  let good4 := s.filter fun s => !s.lazyWhnf.hasRuleK
+  let totalKernel : Nat := good4.foldl (·+ ·.kernel.time) 0 / 1000000
+  let totalLazyWhnf : Nat := good4.foldl (·+ ·.lazyWhnf.time) 0 / 1000000
+  let fracLazy : Float := .ofNat totalLazyWhnf / .ofNat totalKernel * 100
+  IO.println s!"Only reductions without rule k: Count: {good4.size}, Total kernel: {totalKernel}ms, Total lazyWhnf: {totalLazyWhnf}ms ({fracLazy}%)"
+
+def flags := #["--module-list", "--eqrecs", "--read-stats"]
+
+unsafe def withModuleArgs (args : List String) (act : Name → Array ConstantInfo → MetaM Unit) : IO Unit := do
   let sp ← searchPathRef.get
-  let (flags, args) := args.partition fun s => s.startsWith "--"
-  if let .some bad := flags.find? fun f => !flags.contains f then
-    throw <| IO.userError s!"Invalid flag {bad}"
-  let stats : IO.Ref Stats ← IO.mkRef #[]
   args.forM fun arg => do
     let mod ← if arg.endsWith ".olean" then
       let some mod ← searchModuleNameOfFileName arg sp
@@ -259,53 +286,41 @@ unsafe def main (args : List String) : IO UInt32 := do
       match arg.toName with
       | .anonymous => throw <| IO.userError s!"Not a module name: {arg}"
       | m => pure m
-    withMod mod fun cis => do
-      if flags.contains "--eqrecs" then
-        findEqRecs mod.toString cis
-      else
-      if flags.contains "--module-list" then
-        let interesting := cis.any fun ci =>
-          match ci with
-          | .defnInfo {value := e, ..}
-          | .thmInfo {value := e, ..} =>
-            hasByDecideProof e
-          | _ => false
-        if interesting then IO.println mod
-      else
-        IO.println s!"Processing {mod}"
-        checkConstInfos stats mod.toString cis
-  unless flags.contains "--eqrecs" do
-    let filename := "stats.json"
-    let s ← stats.get
-    IO.println s!"Writing {s.size} statistics to {filename}."
-    IO.FS.writeFile filename (toJson s).pretty
-    let good := s.filter (·.lazyWhnf.time > 0)
-    IO.println s!"Of these, {s.size - good.size} failed to compute."
+    withMod mod fun cis => act mod cis
 
-    let totalKernel : Nat := good.foldl (·+ ·.kernel.time) 0 / 1000000
-    let totalLazyWhnf : Nat := good.foldl (·+ ·.lazyWhnf.time) 0 / 1000000
-    let fracLazy : Float := .ofNat totalLazyWhnf / .ofNat totalKernel * 100
+unsafe def main (args : List String) : IO UInt32 := do
+  initSearchPath (← findSysroot)
+  let (flags, args) := args.partition fun s => s.startsWith "--"
+  if let .some bad := flags.find? fun f => !flags.contains f then
+    throw <| IO.userError s!"Invalid flag {bad}"
 
-    let good2 := s.filter (·.lazyWhnfUnfold.time > 0)
-    let totalLazyWhnfUnfold : Nat := good2.foldl (·+ ·.lazyWhnfUnfold.time) 0 / 1000000
-    let fracLazyUnfold : Float := .ofNat totalLazyWhnfUnfold / .ofNat totalKernel * 100
-    IO.println s!"Total kernel: {totalKernel}ms, Total lazyWhnf: {totalLazyWhnf}ms ({fracLazy}%), Total lazyWhnfUnfold: {totalLazyWhnfUnfold}ms ({fracLazyUnfold}%)"
+  let filename := "stats.json"
 
-    let ruleKFrac : Float := .ofNat (good.filter (·.lazyWhnf.hasRuleK)).size / .ofNat good.size * 100
-    IO.println s!"Rule K used in {ruleKFrac}% of reductions."
+  if flags.contains "--eqrecs" then
+    withModuleArgs args fun mod cis => do
+      findEqRecs mod.toString cis
+  else if flags.contains "--module-list" then
+    withModuleArgs args fun mod cis => do
+      let interesting := cis.any fun ci =>
+        match ci with
+        | .defnInfo {value := e, ..}
+        | .thmInfo {value := e, ..} =>
+          hasByDecideProof e
+        | _ => false
+      if interesting then IO.println mod
+  else
+    unless flags.contains "--read-stats" do
+      IO.FS.withFile filename .write fun statsHandle =>
+        let pushStat (s : Stat)  : IO Unit := do
+          statsHandle.putStrLn (toJson s).compress
+        withModuleArgs args fun mod cis => do
+          IO.println s!"Processing {mod}"
+          checkConstInfos pushStat mod.toString cis
 
-    let good3 := s.filter fun s => s.lazyWhnf.time > 0 && s.kernel.isValue
-    let totalKernel : Nat := good3.foldl (·+ ·.kernel.time) 0 / 1000000
-    let totalLazyWhnf : Nat := good3.foldl (·+ ·.lazyWhnf.time) 0 / 1000000
-    let fracLazy : Float := .ofNat totalLazyWhnf / .ofNat totalKernel * 100
-    IO.println s!"Only successful reductions: Count: {good3.size}, Total kernel: {totalKernel}ms, Total lazyWhnf: {totalLazyWhnf}ms ({fracLazy}%)"
-    let ruleKFrac : Float := .ofNat (good3.filter (·.lazyWhnf.hasRuleK)).size / .ofNat good3.size * 100
-    IO.println s!"Rule K used in {ruleKFrac}% of reductions."
-
-    let good4 := s.filter fun s => !s.lazyWhnf.hasRuleK
-    let totalKernel : Nat := good4.foldl (·+ ·.kernel.time) 0 / 1000000
-    let totalLazyWhnf : Nat := good4.foldl (·+ ·.lazyWhnf.time) 0 / 1000000
-    let fracLazy : Float := .ofNat totalLazyWhnf / .ofNat totalKernel * 100
-    IO.println s!"Only reductions without rule k: Count: {good4.size}, Total kernel: {totalKernel}ms, Total lazyWhnf: {totalLazyWhnf}ms ({fracLazy}%)"
+    -- read back stats
+    let stats ← IO.FS.lines filename
+    let stats := stats.map fun s =>
+      match do fromJson? (← Json.parse s) with | .ok r => r | .error e => panic! e
+    summarizeStats stats
 
   return 0
