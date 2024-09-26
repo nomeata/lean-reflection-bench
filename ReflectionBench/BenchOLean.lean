@@ -67,7 +67,7 @@ def timeIt (act : MetaM α) : MetaM (Nat × α) := do
 def runWhnf (desc : String)
     (whnf : Environment → LocalContext → Expr → MetaM (LazyWhnf.Diagnostics × Expr))
     (e : Expr) (checkResult := true) (expectVal : Bool) : MetaM WhnfStat := do
-  try
+  tryCatchRuntimeEx do
     let env ← getEnv
     let lctx ← getLCtx
     let _ ← whnf env lctx e -- warm up
@@ -81,11 +81,13 @@ def runWhnf (desc : String)
         IO.println f!"{desc} reduced\n{← ppExpr e}\nwith rulek-failures to non-value \n{← ppExpr r}"
 
     if checkResult then
-      try withCurrHeartbeats <| withOptions (smartUnfolding.set ·  false) <| Meta.check r
-      catch ex =>
-        -- withOptions (pp.universes.set · true) do
-        -- withOptions (pp.explicit.set · true) do
-          IO.println f!"{desc} reduced\n{← ppExpr e}\nto type-incorrect\n{← ppExpr r}\n{← ex.toMessageData.format}"
+      tryCatchRuntimeEx do
+        withCurrHeartbeats <| withOptions (smartUnfolding.set ·  false) <| Meta.check r
+       fun ex => do
+            IO.println f!"failed"
+          -- withOptions (pp.universes.set · true) do
+          -- withOptions (pp.explicit.set · true) do
+            IO.println f!"{desc} reduced\n{← ppExpr e}\nto type-incorrect\n{← ppExpr r}\n{← ex.toMessageData.format}"
 
       let r' ← kernelWhnf (← Lean.getEnv) (← Lean.getLCtx) e
       unless (← withOptions (smartUnfolding.set ·  false) <| withTransparency .all <| isDefEqGuarded r r') do
@@ -100,7 +102,7 @@ def runWhnf (desc : String)
         ruleKSuccesses := diag.ruleKSuccesses
         ruleKFailures := diag.ruleKFailures
     }
-  catch ex =>
+   fun ex => do
     let f ← Lean.MessageData.format (Lean.Exception.toMessageData ex)
     withOptions (pp.explicit.set · true) do
       IO.println f!"{desc} failed with {f} at\n{← ppExpr e}"
