@@ -206,11 +206,13 @@ def checkValConf (heap : Heap) (v : Val) (env : Env) (stack : Stack) : MetaM Uni
   Meta.withTransparency .all <| withCurrHeartbeats <| do
       unless (← Lean4Lean.check le) do
         -- IO.eprint s!"Not typecorrect:\n{le}\nstack: {stack}\nheap: {heap}\n"
+        /-
         withOptions (·.set `trace.Meta.isDefEq true) do
         withOptions (·.set `trace.Meta.isDefEq.assign true) do
         withOptions (·.set `trace.Meta.isDefEq.cache true) do
         withOptions (·.set `trace.Meta.isDefEq.delta true) do
         withOptions (·.set `trace.Meta.isDefEq.constApprox true) do
+        -/
             Meta.check le
 
 def checkExprConf (heap : Heap) (e : Expr) (lmap : LMap) (env : Env) (stack : Stack) : MetaM Unit := do
@@ -442,6 +444,8 @@ where
             assert! cn = ``Quot.mk
             assert! fs.size = 1
             goPtr diag heap args[3]! (stack.push (.app fs.back))
+          | .neutral e lmap rs =>
+              goVal diag heap (.neutral e lmap (rs.push se)) env stack
           | _ => throwError "Cannot recurse with {qi.name} on value {v}"
         | _ => throwError "Unexpected {ci.name} in rec_"
       | .nfNat n =>
@@ -456,26 +460,39 @@ where
             throwError "Unexpected constructor in nfNat: {v}"
         | .lit (.natVal m) =>
             goVal diag heap (.lit (.natVal (m + n))) env stack
-        | .neutral e lmap rs =>
-            goVal diag heap (.neutral e lmap (rs.push se)) env stack
+        | .neutral .. =>
+          if n = 0 then
+            goVal diag heap v env stack
+          else
+            assert! n > 0
+            let p := heap.size
+            let heap' := heap.push (.value v, env) ++
+              Array.ofFn (n := n-1) fun i =>
+                (.value (.con ``Nat.succ [] #[] #[] #[p + i]) , [])
+            let p' := p + (n-1)
+            goVal diag heap' (.con ``Nat.succ [] #[] #[] #[p']) [] stack
         | _ =>
             throwError "Unexpected value in nfNat: {v}"
       | .primNat f none =>
         match v with
         | .lit (.natVal m) =>
             goVal diag heap (.primNat f m) env stack
-        | .neutral e lmap rs =>
-            -- TODO: Turn into cons cells
-            goVal diag heap (.neutral e lmap (rs.push se)) env stack
         | _ =>
-          throwError "Unexpected value in primNat"
+          let some ci := genv.find? f | throwError "Did not find {f}"
+          let val := ci.value!
+          let p := heap.size
+          let heap' := heap.push (.value v, env)
+          goExp diag heap' val #[] [] (stack.push (.app p))
       | .primNat f (some m) =>
         match v with
         | .lit (.natVal n) =>
             goVal diag heap (evalPrimNat f m n) env stack
-        | .neutral e lmap rs =>
-            goVal diag heap (.neutral e lmap (rs.push se)) env stack
-        | _ => throwError "Unexpected value in primNat"
+        | _ =>
+          let some ci := genv.find? f | throwError "Did not find {f}"
+          let val := ci.value!
+          let p := heap.size
+          let heap' := heap ++ #[(.value (.lit (.natVal m)), []), (.value v, env)]
+          goExp diag heap' val #[] [] (stack ++ #[.app (p+1), .app p])
 
   | .exp =>
     let e : Expr := x1
@@ -618,9 +635,33 @@ set_option pp.funBinderTypes true
 #lazy_reduce Nat.add (Nat.succ 42)
 
 opaque aNat : Nat
-/-- info: Nat.add 43 aNat.succ -/
+/--
+info: ((Nat.rec
+        ⟨(fun (x : Nat) (f : Nat.below (motive := fun (x : Nat) => Nat → Nat) x) (x_1 : Nat) =>
+              (match (motive := Nat → (x : Nat) → Nat.below (motive := fun (x : Nat) => Nat → Nat) x → Nat) x_1, x with
+                | a, Nat.zero => fun (x : Nat.below (motive := fun (x : Nat) => Nat → Nat) Nat.zero) => a
+                | a, b.succ => fun (x : Nat.below (motive := fun (x : Nat) => Nat → Nat) b.succ) => (x.1 a).succ)
+                f)
+            Nat.zero PUnit.unit,
+          PUnit.unit⟩
+        (fun (n : Nat) (n_ih : (fun (x : Nat) => Nat → Nat) n ×' Nat.below (motive := fun (x : Nat) => Nat → Nat) n) =>
+          ⟨(fun (x : Nat) (f : Nat.below (motive := fun (x : Nat) => Nat → Nat) x) (x_1 : Nat) =>
+                (match (motive := Nat → (x : Nat) → Nat.below (motive := fun (x : Nat) => Nat → Nat) x → Nat) x_1,
+                    x with
+                  | a, Nat.zero => fun (x : Nat.below (motive := fun (x : Nat) => Nat → Nat) Nat.zero) => a
+                  | a, b.succ => fun (x : Nat.below (motive := fun (x : Nat) => Nat → Nat) b.succ) => (x.1 a).succ)
+                  f)
+              n.succ n_ih,
+            n_ih⟩)
+        aNat).1
+    43).succ
+-/
 #guard_msgs in
 #lazy_reduce Nat.add (Nat.succ 42) (Nat.succ aNat)
+
+/-- info: true -/
+#guard_msgs in
+#lazy_reduce Nat.ble 10 (aNat+20)
 
 universe u uu
 
@@ -641,12 +682,8 @@ set_option pp.universes true in
 end Levels
 
 -- Tests nat operations on open terms
-/--
-info: Bool.rec (motive := fun (x : Bool) =>
-  ((Nat.add 0 k).add 1).beq 0 = x → (fun (x : Bool) => Decidable ((Nat.add 0 k).add 1 = 0)) x)
-  (fun (h : ((Nat.add 0 k).add 1).beq 0 = false) => isFalse ⋯)
-  (fun (h : ((Nat.add 0 k).add 1).beq 0 = true) => isTrue ⋯) (((Nat.add 0 k).add 1).beq 0) ⋯
--/
+
+/-- info: isFalse ⋯ -/
 #guard_msgs in
 #lazy_reduce fun k => instDecidableEqNat (0 + k + 1) 0
 
