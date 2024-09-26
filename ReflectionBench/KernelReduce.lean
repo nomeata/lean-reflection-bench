@@ -11,3 +11,7 @@ elab "#kernel_reduce" t:term : command => Lean.Elab.Command.runTermElabM fun _ =
 /-- info: isFalse ⋯ -/
 #guard_msgs in
 #kernel_reduce fun k => instDecidableEqNat (0 + k + 1) 0
+
+/-- info: ⟨x.1 + 1, ⋯⟩ -/
+#guard_msgs in
+#kernel_reduce fun (n : Nat) (x: Fin n) => x.succ

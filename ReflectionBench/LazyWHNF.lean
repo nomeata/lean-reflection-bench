@@ -52,6 +52,7 @@ instance : ToString StackElem where
     | .primNat n (.some m) => s!"{n} {m}"
 
 abbrev Stack := Array StackElem
+abbrev RStack := Array StackElem
 
 inductive Val
   -- Partial applied constructor, recursor or quotient
@@ -61,7 +62,7 @@ inductive Val
   | elam : Name → Expr → Expr → LMap → BinderInfo → Val
   | lit : Lean.Literal → Val
   | primNat : Name → Option Nat → Val
-  | neutral : Expr → LMap → Val
+  | neutral : Expr → LMap → RStack → Val
 
 def Val.toString : Val → String
   | .pap ci _ _ _ as => s!"{ci.name} {as}"
@@ -70,7 +71,7 @@ def Val.toString : Val → String
   | .lit l => (repr l).pretty
   | .primNat n .none => s!"{n}"
   | .primNat n (.some m) => s!"{n} {m}"
-  | .neutral e _ => s!"{e}"
+  | .neutral e _ s => s!"{e} {s}"
 
 instance : ToString Val where toString := Val.toString
 
@@ -118,11 +119,11 @@ partial def toVal (genv : Environment) (lmap : LMap) (e : Expr) : MetaM (Option 
         else
           return .some (.pap ci us lmap ii.arity #[])
       | .opaqueInfo _ | .axiomInfo _ =>
-        return .some (.neutral e lmap)
+        return .some (.neutral e lmap #[])
   | .lit l =>
     return .some (.lit l)
   | .sort .. | .forallE .. =>
-    return .some (.neutral e lmap)
+    return .some (.neutral e lmap #[])
   | _ => return none
 
 abbrev ReadBackM := ReaderT Heap <| StateT (Array Expr) <| IO
@@ -146,9 +147,10 @@ partial def readBackVal (v : Val) (env : Env) : ReadBackM Expr := do match v wit
   | .lit t => return .lit t
   | .primNat n none => return .const n []
   | .primNat n (some m) => return mkApp (.const n []) (.lit (.natVal m)) -- ofNat?
-  | .neutral e lmap =>
+  | .neutral e lmap rs =>
     let e := e.instLMap lmap
     let e := e.instantiate (← env.toArray.mapM readBackPtr)
+    let e ← readBackStack e rs.reverse
     return e
 
 partial def readBackPtr (p : Nat) : ReadBackM Expr := do
@@ -166,9 +168,7 @@ partial def readBackPtr (p : Nat) : ReadBackM Expr := do
   else
     return e'
 
-end
-
-def readBackStackElem (se : StackElem) (e : Expr) : ReadBackM Expr := match se with
+partial def readBackStackElem (se : StackElem) (e : Expr) : ReadBackM Expr := match se with
   | .upd _ => return e
   | .app p => return mkApp e (← readBackPtr p)
   | .rec_ ci us lmap args =>
@@ -180,8 +180,10 @@ def readBackStackElem (se : StackElem) (e : Expr) : ReadBackM Expr := match se w
   | .primNat n none => return mkApp (.const n []) e
   | .primNat n (some m) => return mkApp2 (.const n []) (.lit (.natVal m)) e -- ofNat?
 
-def readBackStack (e : Expr) (stack : Stack) : ReadBackM Expr :=
+partial def readBackStack (e : Expr) (stack : Stack) : ReadBackM Expr :=
   stack.foldrM readBackStackElem e
+
+end
 
 def ReadBackM.run (heap : Heap) (act : ReadBackM α) : IO α := do
   Prod.fst <$> (ReaderT.run act heap).run (mkArray heap.size readBackDummy)
@@ -212,7 +214,7 @@ def checkValConf (heap : Heap) (v : Val) (env : Env) (stack : Stack) : MetaM Uni
             Meta.check le
 
 def checkExprConf (heap : Heap) (e : Expr) (lmap : LMap) (env : Env) (stack : Stack) : MetaM Unit := do
-  checkValConf heap (.neutral e lmap) env stack
+  checkValConf heap (.neutral e lmap #[]) env stack
 
 def Val.ofNat (n : Nat) : Val := .lit (.natVal n)
 
@@ -300,7 +302,7 @@ where
     let v : Val := x1
     -- IO.eprint s!"⊢ {v} (stack empty? {stack.isEmpty})\n"
 
-    if stack.isEmpty || v matches .neutral .. then
+    if stack.isEmpty then
       finish diag heap v env stack
     else
       -- checkValConf heap v env stack
@@ -365,6 +367,8 @@ where
           goExp diag heap e' lmap (p :: env) stack
         | .primNat n a? =>
           goPtr diag heap p (stack.push (.primNat n a?) |>.push (.nfNat 0))
+        | .neutral e lmap rs =>
+            goVal diag heap (.neutral e lmap (rs.push se)) env stack
         | _ => throwError "Cannot apply value {v}"
       | .proj _ idx =>
         match v with
@@ -373,6 +377,8 @@ where
             goPtr diag heap p stack
           else
             throwError "Projection out of range"
+        | .neutral e lmap rs =>
+            goVal diag heap (.neutral e lmap (rs.push se)) env stack
         | _ => throwError "Cannot project value {v}"
       | .rec_ ci us lmap args =>
         match ci with
@@ -407,6 +413,25 @@ where
               -- let rhs := rule.rhs.instantiateLevelParams ri.levelParams us
               -- IO.eprint s!"Applying {ri.name} with args {rargs}\n"
               goExp diag heap rhs lmap [] (stack ++ rargs.reverse.map (.app ·))
+          | .neutral e lmap rs =>
+            -- This implements eta-expansion of structure like values
+            let typeName := ri.all[0]!
+            if isStructureLike genv typeName then
+              let numFields := getStructureLikeNumFields genv typeName
+              let heap2 : Array (HeapElem × Env) := Array.ofFn (n := numFields) fun i =>
+                (.value (.neutral e lmap (rs.push (.proj typeName i))), env)
+              let p := heap.size
+              let heap' := heap ++ heap2
+              assert! ri.rules.length = 1
+              let rule := ri.rules[0]!
+              assert! rule.nfields = numFields
+              let rargs : Array Nat := args[:ri.numParams + ri.numMotives + ri.numMinors] ++
+                (Array.range numFields).map (·+p)
+              let rhs := rule.rhs
+              let lmap := lmap.push (ri.levelParams, us)
+              goExp diag heap' rhs lmap [] (stack ++ rargs.reverse.map (.app ·))
+            else
+              goVal diag heap (.neutral e lmap (rs.push se)) env stack
           | _ => throwError "Cannot recurse with {ri.name} on value {v}"
         | .quotInfo qi =>
           unless qi.kind matches .ind || qi.kind matches .lift do
@@ -431,18 +456,25 @@ where
             throwError "Unexpected constructor in nfNat: {v}"
         | .lit (.natVal m) =>
             goVal diag heap (.lit (.natVal (m + n))) env stack
+        | .neutral e lmap rs =>
+            goVal diag heap (.neutral e lmap (rs.push se)) env stack
         | _ =>
-            throwError "Unexpcted value in nfNat: {v}"
+            throwError "Unexpected value in nfNat: {v}"
       | .primNat f none =>
         match v with
         | .lit (.natVal m) =>
             goVal diag heap (.primNat f m) env stack
+        | .neutral e lmap rs =>
+            -- TODO: Turn into cons cells
+            goVal diag heap (.neutral e lmap (rs.push se)) env stack
         | _ =>
           throwError "Unexpected value in primNat"
       | .primNat f (some m) =>
         match v with
         | .lit (.natVal n) =>
             goVal diag heap (evalPrimNat f m n) env stack
+        | .neutral e lmap rs =>
+            goVal diag heap (.neutral e lmap (rs.push se)) env stack
         | _ => throwError "Unexpected value in primNat"
 
   | .exp =>
@@ -503,7 +535,7 @@ where
         | .ldecl _ _ _ _ value _ _ =>
           goExp diag heap value lmap [] stack
         | _ =>
-          goVal diag heap (.neutral e lmap) env stack
+          goVal diag heap (.neutral e lmap #[]) env stack
       | .lam .. => unreachable!
       | .mdata _ e => goExp diag heap e lmap env stack
       | _ => throwError "Unimplemented: {toString e}"
@@ -606,14 +638,21 @@ set_option pp.universes true in
 #guard_msgs in
 #lazy_reduce foo2.{uu,u}
 
+end Levels
 
 -- Tests nat operations on open terms
 /--
-info: Bool.rec (motive := fun (x : Bool) => (0 + k + 1).beq 0 = x → (fun (x : Bool) => Decidable (0 + k + 1 = 0)) x)
-  (fun (h : (0 + k + 1).beq 0 = false) => isFalse ⋯) (fun (h : (0 + k + 1).beq 0 = true) => isTrue ⋯)
-  (((Nat.add 0 k).add 1).beq 0) ⋯
+info: Bool.rec (motive := fun (x : Bool) =>
+  ((Nat.add 0 k).add 1).beq 0 = x → (fun (x : Bool) => Decidable ((Nat.add 0 k).add 1 = 0)) x)
+  (fun (h : ((Nat.add 0 k).add 1).beq 0 = false) => isFalse ⋯)
+  (fun (h : ((Nat.add 0 k).add 1).beq 0 = true) => isTrue ⋯) (((Nat.add 0 k).add 1).beq 0) ⋯
 -/
 #guard_msgs in
 #lazy_reduce fun k => instDecidableEqNat (0 + k + 1) 0
 
-end Levels
+
+-- The kernel eta-expands the argument to Fin.rec here, so we need to do that too
+
+/-- info: ⟨x.1 + 1, ⋯⟩ -/
+#guard_msgs in
+#lazy_reduce fun (n : Nat) (x: Fin n) => x.succ
