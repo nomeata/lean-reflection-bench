@@ -114,6 +114,7 @@ def runWhnf (desc : String)
     }
 
 def checkWhnf (pushStat : StatsWriter) (module decl : String) (e : Expr) : MetaM Unit := do
+  tryCatchRuntimeEx do
     -- IO.println f!"Looking at {← ppExpr e}"
     let inputSize ← e.numObjs
 
@@ -133,6 +134,9 @@ def checkWhnf (pushStat : StatsWriter) (module decl : String) (e : Expr) : MetaM
     if kernelTime > 5000000 ∨ lazyWhnfStats.time > 5000000 then
       IO.println f!"Looking at {← ppExpr e}:"
       IO.println f!"{toJson stat}"
+   fun ex => do
+    IO.println f!"Looking at {← ppExpr e} yielded uncaught exception:\n{← ex.toMessageData.format}"
+
 
 def checkDecide (pushStat : StatsWriter) (mod declName : String) (p inst eq : Expr) : MetaM Unit := do
   if ipushStatlProof eq then
