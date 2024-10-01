@@ -125,7 +125,15 @@ def checkWhnf (pushStat : StatsWriter) (module decl : String) (e : Expr) : MetaM
     -- IO.println f!"Looking at {← ppExpr e}"
     let inputSize ← e.numObjs
 
-    let (kernelTime, r1) ← timeIt <| kernelWhnf (← getEnv) (← getLCtx) e
+    let (kernelTime, r1) ← tryCatchRuntimeEx do
+      timeIt <| kernelWhnf (← getEnv) (← getLCtx) e
+     fun ex => do
+      IO.println f!"Looking at {← ppExpr e}, already kernel reduction failed:\n{← ex.toMessageData.format}"
+      let (_, s) ← (← instantiateMVars e).collectFVars |>.run {}
+      for v in s.fvarIds do
+        let decl ← v.getDecl
+        IO.println f!"where {decl.userName} : {← ppExpr decl.type}"
+      throw ex
     let outputSize ← r1.numObjs
 
     let isVal ← isValue r1
