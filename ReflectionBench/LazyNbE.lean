@@ -286,7 +286,7 @@ set_option pp.funBinderTypes true
 -- should not mention that redex anymore.
 
 
-/-- info: fun (z : Bool) => (fun (a : Bool → Bool) => a) Bool.not z -/
+/-- info: fun (z : Bool) => (fun (a : Bool → Bool) => a) not z -/
 #guard_msgs in
 #nbe_reduce (fun x => x (x (fun z => x Bool.not z))) (id (fun (a : Bool → Bool) => a))
 

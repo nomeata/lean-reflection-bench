@@ -4,11 +4,16 @@ defaultTargets = ["ReflectionBench"]
 [[require]]
 name = "mathlib"
 git = "https://github.com/leanprover-community/mathlib4.git"
-rev = "nightly-testing-2024-09-02"
+rev = "lean-pr-testing-5563"
+
+[[require]]
+name = "batteries"
+git = "https://github.com/leanprover-community/batteries.git"
+rev = "nightly-testing"
 
 [[require]]
 name = "lean4lean"
-git = "https://github.com/digama0/lean4lean.git"
+git = "https://github.com/nomeata/lean4lean.git"
 
 [[lean_lib]]
 name = "ReflectionBench"

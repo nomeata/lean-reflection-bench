@@ -13,6 +13,9 @@ Rough notes
   https://gist.github.com/nomeata/e368723d9d236452f97ef7e66e652532
   This code leaves `Nat.succ` as it is, but makes the built-in `Nat` operations normalize
   its argument under `Nat.succ` (see `StackElem.nfNat`)
+* The kernel's `whnf` will backtrack, e.g. if `reduce_proj` fails, it will undo the changes
+  to the wrapped expression. We keep the reduced term under the projection, which somehow
+  makes type checking fail.
 
 -/
 
@@ -561,12 +564,16 @@ end LazyWhnf
 
 export LazyWhnf (lazyWhnf)
 
+open Meta in
 elab "#lazy_reduce" uf:"unfold"? t:term : command => Lean.Elab.Command.runTermElabM fun _ => do
   let e ← Lean.Elab.Term.elabTermAndSynthesize t none
-  Meta.lambdaTelescope e fun _ e => do
+  lambdaTelescope e fun _ e => do
     let (_diag, e'') ← lazyWhnf (← Lean.getEnv) (← Lean.getLCtx) e (useUnfold := uf.isSome)
-    -- Meta.check e''
-    -- guard (← Meta.isDefEq e e'')
+    if false then
+      withOptions (smartUnfolding.set ·  false) <| withTransparency .all do
+        Meta.check e''
+        unless (← Meta.isDefEq e e'') do
+          throwError "Not defeq"
     Lean.logInfo m!"{e''}"
 
 set_option linter.unusedVariables false
@@ -580,7 +587,7 @@ set_option pp.funBinderTypes true
 -- The `id (fun a => a)` should be reduced once, not twice, and the result
 -- should not mention that redex anymore.
 
-/-- info: fun (z : Bool) => (fun (a : Bool → Bool) => a) Bool.not z -/
+/-- info: fun (z : Bool) => (fun (a : Bool → Bool) => a) not z -/
 #guard_msgs in
 #lazy_reduce (fun x => x (x (fun z => x Bool.not z))) (id (fun (a : Bool → Bool) => a))
 

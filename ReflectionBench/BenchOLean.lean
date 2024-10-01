@@ -86,14 +86,21 @@ def runWhnf (desc : String)
         withCurrHeartbeats <| withOptions (smartUnfolding.set ·  false) <| Meta.check r
        fun ex => do
             IO.println f!"failed"
-          -- withOptions (pp.universes.set · true) do
-          -- withOptions (pp.explicit.set · true) do
+            -- withOptions (pp.universes.set · true) do
+            -- withOptions (pp.explicit.set · true) do
+            withOptions (pp.coercions.set · false) do
             IO.println f!"{desc} reduced\n{← ppExpr e}\nto type-incorrect\n{← ppExpr r}\n{← ex.toMessageData.format}"
+            -- IO.println f!"of type {← ppExpr (← inferType e)}"
+            -- let (_, s) ← (← instantiateMVars e).collectFVars |>.run {}
+            -- for v in s.fvarIds do
+            --   let decl ← v.getDecl
+            --   IO.println f!"where {decl.userName} : {← ppExpr decl.type}"
 
       let r' ← kernelWhnf (← Lean.getEnv) (← Lean.getLCtx) e
       unless (← withOptions (smartUnfolding.set ·  false) <| withTransparency .all <| isDefEqGuarded r r') do
         -- withOptions (pp.universes.set · true) do
         withOptions (pp.deepTerms.set · true) do
+        -- withOptions (pp.explicit.set · true) do
           IO.println f!"{desc} reduced\n{← ppExpr e}\nto\n{← ppExpr r}\nnot defeq to \n{← ppExpr r'}"
 
     return {
