@@ -422,19 +422,24 @@ where
             -- This implements eta-expansion of structure like values
             let typeName := ri.all[0]!
             if isStructureLike genv typeName then
-              let numFields := getStructureLikeNumFields genv typeName
-              let heap2 : Array (HeapElem × Env) := Array.ofFn (n := numFields) fun i =>
-                (.value (.neutral e lmap (rs.push (.proj typeName i))), env)
-              let p := heap.size
-              let heap' := heap ++ heap2
-              assert! ri.rules.length = 1
-              let rule := ri.rules[0]!
-              assert! rule.nfields = numFields
-              let rargs : Array Nat := args[:ri.numParams + ri.numMotives + ri.numMinors] ++
-                (Array.range numFields).map (·+p)
-              let rhs := rule.rhs
-              let lmap := lmap.push (ri.levelParams, us)
-              goExp diag heap' rhs lmap [] (stack ++ rargs.reverse.map (.app ·))
+              -- Only for non-Props
+              let indInfo ← getConstInfoInduct typeName
+              if (← Meta.isPropFormerType (← Meta.inferType (mkConst typeName (us.take indInfo.levelParams.length)))) then
+                goVal diag heap (.neutral e lmap (rs.push se)) env stack
+              else
+                let numFields := getStructureLikeNumFields genv typeName
+                let heap2 : Array (HeapElem × Env) := Array.ofFn (n := numFields) fun i =>
+                  (.value (.neutral e lmap (rs.push (.proj typeName i))), env)
+                let p := heap.size
+                let heap' := heap ++ heap2
+                assert! ri.rules.length = 1
+                let rule := ri.rules[0]!
+                assert! rule.nfields = numFields
+                let rargs : Array Nat := args[:ri.numParams + ri.numMotives + ri.numMinors] ++
+                  (Array.range numFields).map (·+p)
+                let rhs := rule.rhs
+                let lmap := lmap.push (ri.levelParams, us)
+                goExp diag heap' rhs lmap [] (stack ++ rargs.reverse.map (.app ·))
             else
               goVal diag heap (.neutral e lmap (rs.push se)) env stack
           | _ => throwError "Cannot recurse with {ri.name} on value {v}"
@@ -700,3 +705,11 @@ end Levels
 /-- info: ⟨x.1 + 1, ⋯⟩ -/
 #guard_msgs in
 #lazy_reduce fun (n : Nat) (x: Fin n) => x.succ
+
+-- The kernel does no such eta-expansion for props
+
+axiom andAx : True ∧ True
+
+/-- info: And.rec (fun (a x : True) => a) andAx -/
+#guard_msgs in
+#lazy_reduce andAx.rec (motive := fun _ => True) (fun a _ => a)

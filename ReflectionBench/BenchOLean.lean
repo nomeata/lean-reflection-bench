@@ -78,8 +78,11 @@ def runWhnf (desc : String)
     if expectVal && !isVal then
         IO.println f!"{desc} reduced\n{← ppExpr e}\nto non-value \n{← ppExpr r}"
 
+    /-
+    This is ok, can happen due to the struct-eta rule
     if isVal && diag.ruleKFailures > 0 then
-        IO.println f!"{desc} reduced\n{← ppExpr e}\nwith rulek-failures to non-value \n{← ppExpr r}"
+        IO.println f!"{desc} reduced\n{← ppExpr e}\nwith rulek-failures to value \n{← ppExpr r}"
+    -/
 
     if checkResult then
       tryCatchRuntimeEx do
