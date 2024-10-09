@@ -111,11 +111,10 @@ theorem Fin.decideAll_to_Fin.all {n : Nat} {P : Fin n → Prop} [DecidablePred P
 def Nat.all_below {n : Nat} (P : Nat → Bool) : Bool :=
   Nat.rec true (fun i ih => P i && ih) n
 
-/-- The following makes simp throw a type error! -/
--- @[simp]
-theorem foo1' {n : Nat} {P : Fin n → Prop} [DecidablePred P]
-  (P' : Nat → Bool) (hP : ∀ i h, decide (P ⟨i, h⟩) = P' i):
-    decide (∀ x, P x) = n.all_below P' := by
+@[simp]
+theorem Fin.all_to_all_below {n : Nat} {P : ∀ i < n, Bool}
+  (P' : Nat → Bool) (hP : ∀ i h, P i h = P' i):
+    Fin.all P = n.all_below P' := by
   sorry
 
 theorem Fin.decideEq_to_Nat {n : Nat} {x y : Fin n} :
@@ -165,11 +164,9 @@ attribute [simp] instHMod Nat.instMod instHDiv Nat.instDiv
 attribute [simp] Nat.decideEq_to_beq
 
 def betterComputation3: Bool := optimize exampleComputation
-#print betterComputation3
+
+-- #print betterComputation3
 
 #time #guard_msgs(drop all) in #reduce betterComputation3
 #time #guard_msgs(drop all) in #kernel_reduce betterComputation3
 #time #guard_msgs(drop all) in #lazy_reduce betterComputation3
-
-attribute [simp] exampleComputation Magma.op M2 MemeFinOp.opOfTable Equation2531
-attribute [simp] Fin.decideAll_to_Fin.all Fin.all
