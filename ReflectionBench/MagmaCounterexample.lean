@@ -1,6 +1,7 @@
 import Lean
--- import ReflectionBench.KernelReduce
--- import ReflectionBench.LazyWHNF
+import ReflectionBench.KernelReduce
+import ReflectionBench.LazyWHNF
+import ReflectionBench.MemoFinOp
 
 section DecideBang
 
@@ -72,27 +73,103 @@ end DecideBang
 universe u
 
 class Magma (α : Type u) where
-/-- `a ∘ b` computes a binary operation of `a` and `b`. -/
+/-- `a ◇ b` computes a binary operation of `a` and `b`. -/
 op : α → α → α
 
 -- We use abbrev here so that type class search, in particular `by decide` can look through them
 
-@[inherit_doc] infixl:65 " ∘ "   => Magma.op
+@[inherit_doc] infixl:65 " ◇ "   => Magma.op
 abbrev Equation1 (G: Type _) [Magma G] := ∀ x : G, x = x
-abbrev Equation411 (G: Type _) [Magma G] := ∀ x : G, x = x ∘ (x ∘ (x ∘ (x ∘ x)))
-abbrev Equation412 (G: Type _) [Magma G] := ∀ x y : G, x = x ∘ (x ∘ (x ∘ (x ∘ y)))
-abbrev Equation413 (G: Type _) [Magma G] := ∀ x y : G, x = x ∘ (x ∘ (x ∘ (y ∘ x)))
-abbrev Equation429 (G: Type _) [Magma G] := ∀ x y : G, x = x ∘ (y ∘ (x ∘ (y ∘ x)))
-abbrev Equation473 (G: Type _) [Magma G] := ∀ x y : G, x = y ∘ (x ∘ (y ∘ (x ∘ x)))
-
+abbrev Equation411 (G: Type _) [Magma G] := ∀ x : G, x = x ◇ (x ◇ (x ◇ (x ◇ x)))
+abbrev Equation412 (G: Type _) [Magma G] := ∀ x y : G, x = x ◇ (x ◇ (x ◇ (x ◇ y)))
+abbrev Equation413 (G: Type _) [Magma G] := ∀ x y : G, x = x ◇ (x ◇ (x ◇ (y ◇ x)))
+abbrev Equation429 (G: Type _) [Magma G] := ∀ x y : G, x = x ◇ (y ◇ (x ◇ (y ◇ x)))
+abbrev Equation473 (G: Type _) [Magma G] := ∀ x y : G, x = y ◇ (x ◇ (y ◇ (x ◇ x)))
+abbrev Equation3167 (G: Type _) [Magma G] := ∀ x y z : G, x = (((y ◇ y) ◇ z) ◇ z) ◇ x
+abbrev Equation2531 (G: Type _) [Magma G] := ∀ x y : G, x = (y ◇ ((y ◇ x) ◇ x)) ◇ y
 
 
 -- from equational_theories/FinitePoly/Refutation212.lean
-def M : Magma (Fin 5) where
+def M : Magma (Fin 20) where
   op x y := 4 * x*x + 2 * x + 2 * y
 
-theorem MFacts : @Equation411 _ M ∧ @Equation429 _ M ∧ @Equation473 _ M := by
-  decide
+def table : Nat := 176572862725894008122698639442158340463570358062018791456284713065412594783123644086682432661794684073102303331486778326370940525772356431236683795848309863276639424307474540043134479302998
 
---#time #lazy_reduce decide (@Equation411 _ M)
---#time #kernel_reduce decide (@Equation411 _ M)
+def M2 : Magma (Fin 13) where
+  op := MemeFinOp.opOfTable table
+
+def exampleComputation : Bool := decide (@Equation2531 _ M2)
+
+
+def Fin.all {n : Nat} (P : ∀ i < n, Bool) : Bool :=
+  Nat.rec true (fun i ih => P i sorry && ih) n
+
+theorem Fin.decideAll_to_Fin.all {n : Nat} {P : Fin n → Prop} [DecidablePred P] :
+    decide (∀ x, P x) = Fin.all (fun i h => decide (P ⟨i, h⟩)) := by
+  sorry
+
+def Nat.all_below {n : Nat} (P : Nat → Bool) : Bool :=
+  Nat.rec true (fun i ih => P i && ih) n
+
+/-- The following makes simp throw a type error! -/
+-- @[simp]
+theorem foo1' {n : Nat} {P : Fin n → Prop} [DecidablePred P]
+  (P' : Nat → Bool) (hP : ∀ i h, decide (P ⟨i, h⟩) = P' i):
+    decide (∀ x, P x) = n.all_below P' := by
+  sorry
+
+theorem Fin.decideEq_to_Nat {n : Nat} {x y : Fin n} :
+  decide (x = y) = decide (x.val = y.val) := by sorry
+
+theorem Nat.decideEq_to_beq {x y : Nat} :
+  decide (x = y) = (Nat.beq x y) := by sorry
+
+-- attribute [simp] table
+
+set_option maxRecDepth 2000
+
+open Lean Elab Meta in
+elab "optimize" t:term : term  <= expectedType? => do
+  let e ← Lean.Elab.Term.elabTermAndSynthesize t expectedType?
+  let ctx ← Simp.Context.mkDefault
+  let (res, _stats) ← simp e ctx
+  return res.expr
+
+
+-- set_option pp.explicit true
+
+
+#time #guard_msgs(drop all) in #reduce exampleComputation
+#time #guard_msgs(drop all) in #kernel_reduce exampleComputation
+#time #guard_msgs(drop all) in #lazy_reduce exampleComputation
+
+attribute [simp] exampleComputation Fin.decideAll_to_Fin.all
+
+def betterComputation1 : Bool := optimize exampleComputation
+
+#time #guard_msgs(drop all) in #reduce betterComputation1
+#time #guard_msgs(drop all) in #kernel_reduce betterComputation1
+#time #guard_msgs(drop all) in #lazy_reduce betterComputation1
+
+attribute [simp] Magma.op M2 MemeFinOp.opOfTable
+
+def betterComputation2 : Bool := optimize exampleComputation
+
+#time #guard_msgs(drop all) in #reduce betterComputation2
+#time #guard_msgs(drop all) in #kernel_reduce betterComputation2
+#time #guard_msgs(drop all) in #lazy_reduce betterComputation2
+
+attribute [-simp] Nat.add_eq Nat.pow_eq Nat.mul_eq
+attribute [simp] instHAdd instHMul instAddNat instMulNat instHPow instPowNat instNatPowNat
+attribute [simp] instHMod Nat.instMod instHDiv Nat.instDiv
+attribute [simp] Nat.decideEq_to_beq
+
+def betterComputation3: Bool := optimize exampleComputation
+#print betterComputation3
+
+#time #guard_msgs(drop all) in #reduce betterComputation3
+#time #guard_msgs(drop all) in #kernel_reduce betterComputation3
+#time #guard_msgs(drop all) in #lazy_reduce betterComputation3
+
+attribute [simp] exampleComputation Magma.op M2 MemeFinOp.opOfTable Equation2531
+attribute [simp] Fin.decideAll_to_Fin.all Fin.all
