@@ -22,6 +22,7 @@ structure Stat where
   kernel : WhnfStat
   lazyWhnf : WhnfStat
   lazyWhnfUnfold : WhnfStat
+  lean4lean : WhnfStat
 deriving ToJson, FromJson, Repr, Inhabited
 
 
@@ -41,6 +42,12 @@ def lean4LeanCheck (e : Expr) : MetaM Unit := do
   let r ← TypeChecker.M.run (← getEnv) .safe (← getLCtx) do
       TypeChecker.check e .none
   let _ ← Lean.ofExceptKernelException r
+
+def lean4LeanWhnf (env : Environment) (lctx : LocalContext) (e : Expr) : MetaM (LazyWhnf.Diagnostics × Expr) := do
+  let e ← TypeChecker.M.run env .safe lctx do
+      TypeChecker.whnf e
+  let e ← Lean.ofExceptKernelException e
+  return ({}, e)
 
 def isValue : Expr → MetaM Bool
   | .sort .. | .lam .. | .lit .. | .forallE .. => return true
@@ -144,10 +151,12 @@ def checkWhnf (pushStat : StatsWriter) (module decl : String) (e : Expr) : MetaM
 
     let lazyWhnfStats ← runWhnf (expectVal := isVal) "lazyWhnf" lazyWhnf e
     let lazyWhnfUnfoldStats ← runWhnf (expectVal := isVal) (checkResult := false) "lazyWhnfUnfold" (lazyWhnf (useUnfold := true)) e
+    let lean4leanStats ← runWhnf (expectVal := isVal) (checkResult := false) "lean4lean" lean4LeanWhnf e
     let kernel : WhnfStat := { outputSize, time := kernelTime,
                                isValue := isVal }
     let stat : Stat := { module, decl, inputSize, kernel,
-                         lazyWhnf := lazyWhnfStats, lazyWhnfUnfold := lazyWhnfUnfoldStats }
+                         lazyWhnf := lazyWhnfStats, lazyWhnfUnfold := lazyWhnfUnfoldStats,
+                         lean4lean := lean4leanStats }
     pushStat stat
     if kernelTime > 5000000 ∨ lazyWhnfStats.time > 5000000 then
       IO.println f!"Looking at {← ppExpr e}:"
@@ -294,6 +303,12 @@ def summarizeStats (s : Array Stat) : IO Unit := do
   let totalLazyWhnf : Nat := good4.foldl (·+ ·.lazyWhnf.time) 0 / 1000000
   let fracLazy : Float := .ofNat totalLazyWhnf / .ofNat totalKernel * 100
   IO.println s!"Only reductions without rule k: Count: {good4.size}, Total kernel: {totalKernel}ms, Total lazyWhnf: {totalLazyWhnf}ms ({fracLazy}%)"
+
+  let good5 := s.filter (fun s => s.lazyWhnf.time > 0 && s.lean4lean.time > 0)
+  let totalLean4lean : Nat := good5.foldl (·+ ·.lean4lean.time) 0 / 1000000
+  let totalLazyWhnf : Nat := good5.foldl (·+ ·.lazyWhnf.time) 0 / 1000000
+  let fracLazy : Float := .ofNat totalLazyWhnf / .ofNat totalLean4lean * 100
+  IO.println s!"Comparing against lean4lean: Count: {good4.size}, Total lean4lean: {totalLean4lean}ms, Total lazyWhnf: {totalLazyWhnf}ms ({fracLazy}%)"
 
 def flags := #["--module-list", "--eqrecs", "--read-stats"]
 
