@@ -1,5 +1,6 @@
 import Lean
 import ReflectionBench.KernelReduce
+import ReflectionBench.Lean4LeanReduce
 import ReflectionBench.LazyWHNF
 import ReflectionBench.MemoFinOp
 
@@ -140,6 +141,7 @@ elab "optimize" t:term : term  <= expectedType? => do
 
 #time #guard_msgs(drop all) in #reduce exampleComputation
 #time #guard_msgs(drop all) in #kernel_reduce exampleComputation
+#time #guard_msgs(drop all) in #lean4lean_reduce exampleComputation
 #time #guard_msgs(drop all) in #lazy_reduce exampleComputation
 
 attribute [simp] exampleComputation Fin.decideAll_to_Fin.all
@@ -148,6 +150,7 @@ def betterComputation1 : Bool := optimize exampleComputation
 
 #time #guard_msgs(drop all) in #reduce betterComputation1
 #time #guard_msgs(drop all) in #kernel_reduce betterComputation1
+#time #guard_msgs(drop all) in #lean4lean_reduce betterComputation1
 #time #guard_msgs(drop all) in #lazy_reduce betterComputation1
 
 attribute [simp] Magma.op M2 MemeFinOp.opOfTable
@@ -156,6 +159,7 @@ def betterComputation2 : Bool := optimize exampleComputation
 
 #time #guard_msgs(drop all) in #reduce betterComputation2
 #time #guard_msgs(drop all) in #kernel_reduce betterComputation2
+#time #guard_msgs(drop all) in #lean4lean_reduce betterComputation2
 #time #guard_msgs(drop all) in #lazy_reduce betterComputation2
 
 attribute [-simp] Nat.add_eq Nat.pow_eq Nat.mul_eq
@@ -169,4 +173,5 @@ def betterComputation3: Bool := optimize exampleComputation
 
 #time #guard_msgs(drop all) in #reduce betterComputation3
 #time #guard_msgs(drop all) in #kernel_reduce betterComputation3
+#time #guard_msgs(drop all) in #lean4lean_reduce betterComputation3
 #time #guard_msgs(drop all) in #lazy_reduce betterComputation3
